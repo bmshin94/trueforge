@@ -1,12 +1,12 @@
 dependencies:
 - name: postgresql
   repository: oci://registry-1.docker.io/bitnamicharts
-  version: 16.7.27
+  version: 18.11.3
 - name: redis
   repository: oci://registry-1.docker.io/bitnamicharts
   version: 24.0.0
 - name: tfy-sandbox-server
   repository: oci://tfy.jfrog.io/tfy-helm
   version: 0.3.3
-digest: sha256:4a1e8e592add0094b94177b0e5deea17ccec1efc034e4399176a9421e8fca0a7
-generated: "2026-09-17T18:47:27.221049+05:30"
+digest: sha256:255083b7a7b0410e6c491b623b3d570fdd7a418d50ddb4a7361a556a86ff5b00
+generated: "2026-09-17T19:49:46.58537569Z"
