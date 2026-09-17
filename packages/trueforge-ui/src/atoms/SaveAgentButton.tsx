@@ -95,10 +95,7 @@ function SaveAgentButtonContent({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const isUpdateMode =
-    shell?.mode.status === 'active' &&
-    shell.mode.isMutable &&
-    (shell.mode.agentName !== undefined || shell.mode.agentId !== undefined);
+  const isUpdateMode = shell?.mode.status === 'active' && shell.mode.isMutable && shell.mode.agentId !== undefined;
   const canCreate = canCreateAgent && !createAgentPermissionLoading;
   const canTrigger = isUpdateMode ? canManageAgent : canCreate;
 
@@ -122,7 +119,7 @@ function SaveAgentButtonContent({
     const latestAgentSpec =
       instructionsDraft === undefined ? flushedAgentSpec : { ...flushedAgentSpec, instructions: instructionsDraft };
     const currentName = shell?.mode.status === 'active' ? (shell.mode.agentName ?? shell.mode.agentId ?? '') : '';
-    setIntent(currentName ? 'update' : 'create');
+    setIntent(isUpdateMode ? 'update' : 'create');
     setName(currentName);
     setDescription(currentName && shell?.mode.status === 'active' ? (shell.mode.description ?? '') : '');
     setDraftSpec(cloneAgentSpec(latestAgentSpec));
