@@ -228,10 +228,10 @@ export function AgentOverflowMenu({
       <SideDrawer
         open={cloneOpen}
         onOpenChange={next => !next && closeClone()}
-        title="Save agent"
+        title="Clone Agent"
         anchor="right"
         size="md"
-        aria-label="Save agent"
+        aria-label="Clone Agent"
       >
         {cloneSpec != null ? (
           <SaveAgentForm

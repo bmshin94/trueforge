@@ -305,7 +305,7 @@ describe('AgentsLibrary', () => {
     expect(screen.getByRole('menuitem', { name: 'Clone' })).toBeEnabled();
   });
 
-  it('opens Save agent drawer on Clone, creates on save, and stays on the library', async () => {
+  it('opens Clone Agent drawer on Clone, creates on save, and stays on the library', async () => {
     const saveAgent = vi.fn(async () => ({ agentId: 'writer-clone-id' }));
     const server = createMockAgentUIServer({
       searchAgents: vi.fn(async () => [
@@ -329,7 +329,7 @@ describe('AgentsLibrary', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Actions for writer' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Clone' }));
 
-    const drawer = await screen.findByRole('dialog', { name: 'Save agent' });
+    const drawer = await screen.findByRole('dialog', { name: 'Clone Agent' });
     expect(within(drawer).getByLabelText('Agent name')).toHaveValue('writer-clone');
     expect(within(drawer).getByLabelText('Description')).toHaveValue('Writes release notes.');
     expect(saveAgent).not.toHaveBeenCalled();
@@ -346,7 +346,7 @@ describe('AgentsLibrary', () => {
     });
     expect(screen.getByRole('heading', { name: 'Agents' })).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.queryByRole('dialog', { name: 'Save agent' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'Clone Agent' })).not.toBeInTheDocument();
     });
   });
 
