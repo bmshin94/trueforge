@@ -6,14 +6,22 @@ import { z } from 'zod';
 
 import type { McpAuthStatus } from '../schemas/mcpServer';
 import { createInternalTlsDispatcher, normalizeInternalTlsUrl, type InternalTlsOptions } from './internalTls';
+import { mapResolvedAgentSkillVersions, type ResolvedAgentSkillVersion } from './mapSfyAgentSkills';
 import { parseSfyMcpAuthStatus, parseSfyMcpAuthorizeResult, type SfyMcpAuthSource } from './mapSfyMcpServers';
 
 const INTEGRATIONS_PATH = 'v1/provider-integrations';
 const INSTALLATIONS_PATH = 'v1/llm-gateway/installations';
 const MCP_SERVERS_PATH = 'v1/mcp';
 const TFG_AGENTS_PATH = 'internal/tfg/agents';
+const TFG_AGENT_SKILL_VERSIONS_RESOLVE_PATH = 'internal/tfg/agent-skill-versions/resolve';
+const AGENT_SKILLS_PATH = 'v1/agent-skills';
+const AGENT_SKILL_VERSIONS_PATH = 'v1/agent-skill-versions';
 const SESSION_PATH = 'v1/session';
-const INTEGRATIONS_PAGE_SIZE = 1000;
+const AGENT_PERMISSIONS_PATH = 'v1/authorize/permissions';
+const VEND_TOKEN_PATH = 'internal/vend-token';
+const AGENT_SKILLS_PAGE_SIZE = 100;
+/** SFY resolve `@ArrayMaxSize(50)` — chunk larger AgentSpec skill lists. */
+const AGENT_SKILL_RESOLVE_CHUNK_SIZE = 50;
 
 /**
  * Fields required to build RequestContext from ServiceFoundry `GET /v1/session`.
@@ -33,14 +41,21 @@ const GetSessionUserSchema = z.object({
   subject: SessionSubjectSchema,
 });
 
-const GetSessionWireSchema = z.object({
-  user: GetSessionUserSchema.nullable(),
+const GetSessionUnauthenticatedSchema = z.object({
+  user: z.null(),
 });
 
-/** Authenticated session payload (`user` is non-null after {@link TrueFoundryServiceFoundryServerClient.getSession}). */
-export interface GetSessionResponse {
-  user: z.infer<typeof GetSessionUserSchema>;
-}
+const GetSessionAuthenticatedSchema = z
+  .object({
+    user: GetSessionUserSchema,
+    controlPlaneURL: z.url(),
+  })
+  .transform(({ user, controlPlaneURL: public_base_url }) => ({ user, public_base_url }));
+
+const GetSessionWireSchema = z.union([GetSessionUnauthenticatedSchema, GetSessionAuthenticatedSchema]);
+
+/** Authenticated session payload returned by {@link TrueFoundryServiceFoundryServerClient.getSession}. */
+export type GetSessionResponse = z.infer<typeof GetSessionAuthenticatedSchema>;
 
 const ListResponseSchema = z.union([
   z.array(z.unknown()),
@@ -61,12 +76,35 @@ const PutRemoteAgentResponseSchema = z.object({
   agentId: z.string().min(1),
 });
 
+const AgentPermissionSchema = z.enum(['READ_AGENT', 'USE_AGENT', 'MANAGE_AGENT', 'DELETE_AGENT']);
+export type AgentPermission = z.infer<typeof AgentPermissionSchema>;
+
+/** ServiceFoundry may return grants we do not use; drop them instead of failing. */
+const AgentPermissionsSchema = z.record(
+  z.string(),
+  z.array(z.string()).transform(permissions =>
+    permissions.flatMap(permission => {
+      const parsed = AgentPermissionSchema.safeParse(permission);
+      return parsed.success ? [parsed.data] : [];
+    }),
+  ),
+);
+export type AgentPermissions = z.infer<typeof AgentPermissionsSchema>;
+
+const VendTokenResponseSchema = z.object({
+  subjectToken: z.string().min(1),
+  actorToken: z.string().min(1),
+});
+
+export type VendedTokens = z.infer<typeof VendTokenResponseSchema>;
+
 export interface PutRemoteAgentInput {
   accessToken: string;
   name: string;
   description: string;
   model: string;
   mcp_servers: string[];
+  trueFoundryManagedAgentId?: string;
 }
 
 export interface PutRemoteAgentResult {
@@ -76,6 +114,15 @@ export interface PutRemoteAgentResult {
 export interface DeleteRemoteAgentInput {
   accessToken: string;
   externalId: string;
+}
+
+/** SF admin assume-user: `serviceaccount/{tenant}/truefoundry/tfy-system`. */
+export const TFY_ASSUME_USER_HEADER = 'x-tfy-assume-user';
+const TFY_SYSTEM_ASSUME_SUBJECT = 'truefoundry';
+const TFY_SYSTEM_CONTROLLER = 'tfy-system';
+
+export function tenantSystemAssumeUserHeader(tenantName: string): string {
+  return `serviceaccount/${tenantName}/${TFY_SYSTEM_ASSUME_SUBJECT}/${TFY_SYSTEM_CONTROLLER}`;
 }
 
 async function readServiceFoundryErrorMessage(
@@ -101,6 +148,8 @@ export class TrueFoundryServiceFoundryServerClient {
   readonly #dispatcher: Dispatcher | undefined;
   readonly #httpTimeoutMs: number;
   readonly #httpAgentTimeoutMs: number;
+  readonly #apiKey: string;
+  readonly #headers: Record<string, string>;
 
   constructor(input: {
     serviceFoundryServerUrl: string;
@@ -108,6 +157,10 @@ export class TrueFoundryServiceFoundryServerClient {
     tls: InternalTlsOptions;
     httpTimeoutMs: number;
     httpAgentTimeoutMs: number;
+    /** Service API key for vend-token and other privileged SFY calls. */
+    apiKey: string;
+    /** Extra headers on every request (e.g. `x-tfy-assume-user` for import). */
+    headers?: Record<string, string>;
   }) {
     const tls = input.tls;
     this.#baseUrl = normalizeInternalTlsUrl({ url: input.serviceFoundryServerUrl, enabled: tls.enabled }).replace(
@@ -118,31 +171,37 @@ export class TrueFoundryServiceFoundryServerClient {
     this.#logger = input.logger;
     this.#httpTimeoutMs = input.httpTimeoutMs;
     this.#httpAgentTimeoutMs = input.httpAgentTimeoutMs;
+    this.#apiKey = input.apiKey;
+    this.#headers = input.headers ?? {};
   }
 
-  async listProviderIntegrations(accessToken: string): Promise<unknown[]> {
-    const items: unknown[] = [];
-    let offset = 0;
-    for (;;) {
-      const payload = await this.#requestJson({
-        url: this.#url(INTEGRATIONS_PATH, {
-          type: 'model',
-          offset: String(offset),
-          limit: String(INTEGRATIONS_PAGE_SIZE),
-        }),
-        accessToken,
-        method: 'GET',
-      });
-      const response = this.#parseListResponse(payload);
-      const page = listPage(response);
-      const total = listPaginationTotal(response);
-      items.push(...page);
-      if (total === undefined || items.length >= total || page.length === 0) {
-        break;
-      }
-      offset = items.length;
-    }
-    return items;
+  /** Service API key (`TRUEFOUNDRY_API_KEY`); callers pass it explicitly when needed. */
+  get apiKey(): string {
+    return this.#apiKey;
+  }
+
+  /**
+   * Model integrations. No limit/offset → full match set in one response.
+   * Pass `filter` (account + model name together) for a point lookup.
+   */
+  async listProviderIntegrations(input: {
+    accessToken: string;
+    filter?: { provider_account_name: string; name: string };
+  }): Promise<unknown[]> {
+    const filterQuery =
+      input.filter === undefined
+        ? {}
+        : {
+            provider_account_name: input.filter.provider_account_name,
+            name: input.filter.name,
+          };
+    const query: Record<string, string> = { type: 'model', ...filterQuery };
+    const payload = await this.#requestJson({
+      url: this.#url(INTEGRATIONS_PATH, query),
+      accessToken: input.accessToken,
+      method: 'GET',
+    });
+    return listPage(this.#parseListResponse(payload));
   }
 
   listGatewayInstallations(accessToken: string): Promise<unknown> {
@@ -153,25 +212,16 @@ export class TrueFoundryServiceFoundryServerClient {
     });
   }
 
-  /** One page of MCP servers; optional `names` filters with `name IN (…)`. */
-  async listMcpServers(input: {
-    accessToken: string;
-    limit: number;
-    offset: number;
-    names?: readonly string[];
-  }): Promise<unknown[]> {
-    const query: Record<string, string> = {
-      offset: String(input.offset),
-      limit: String(input.limit),
-      ...(input.names !== undefined
-        ? {
+  async listMcpServers(input: { accessToken: string; names?: readonly string[] }): Promise<unknown[]> {
+    const query: Record<string, string> =
+      input.names === undefined
+        ? {}
+        : {
             filter: JSON.stringify({
               op: 'and',
               values: [{ field: 'name', op: 'IN', values: [...input.names] }],
             }),
-          }
-        : {}),
-    };
+          };
     const payload = await this.#requestJson({
       url: this.#url(MCP_SERVERS_PATH, query),
       accessToken: input.accessToken,
@@ -203,6 +253,7 @@ export class TrueFoundryServiceFoundryServerClient {
 
   /** PUT `/internal/tfg/agents` — create/reuse remote agent + sync model/MCP grants. */
   async putRemoteAgent(input: PutRemoteAgentInput): Promise<PutRemoteAgentResult> {
+    const hasTrueFoundryManagedAgentId = input.trueFoundryManagedAgentId !== undefined;
     const payload = await this.#requestJson({
       url: this.#url(TFG_AGENTS_PATH),
       accessToken: input.accessToken,
@@ -213,6 +264,7 @@ export class TrueFoundryServiceFoundryServerClient {
         description: input.description,
         model: input.model,
         mcp_servers: input.mcp_servers,
+        ...(hasTrueFoundryManagedAgentId ? { trueFoundryManagedAgentId: input.trueFoundryManagedAgentId } : {}),
       },
     });
     const parsed = PutRemoteAgentResponseSchema.safeParse(payload);
@@ -237,6 +289,111 @@ export class TrueFoundryServiceFoundryServerClient {
       timeoutMs: this.#httpAgentTimeoutMs,
       notFoundOk: true,
     });
+  }
+
+  /** `GET /v1/agent-skills` with empty skills excluded. */
+  async listAgentSkills(input: { accessToken: string }): Promise<unknown[]> {
+    return this.#listAllPages({
+      path: AGENT_SKILLS_PATH,
+      accessToken: input.accessToken,
+      query: { include_empty_agent_skills: 'false' },
+      limit: AGENT_SKILLS_PAGE_SIZE,
+    });
+  }
+
+  /** `GET /v1/agent-skill-versions?fqn=` (one row) or `?agent_skill_id=` (all versions). */
+  async listAgentSkillVersions(input: {
+    accessToken: string;
+    fqn?: string;
+    agent_skill_id?: string;
+  }): Promise<unknown[]> {
+    const query: Record<string, string> = {};
+    if (input.fqn !== undefined) {
+      query['fqn'] = input.fqn;
+    }
+    if (input.agent_skill_id !== undefined) {
+      query['agent_skill_id'] = input.agent_skill_id;
+    }
+    return this.#listAllPages({
+      path: AGENT_SKILL_VERSIONS_PATH,
+      accessToken: input.accessToken,
+      query,
+      limit: AGENT_SKILLS_PAGE_SIZE,
+    });
+  }
+
+  /**
+   * `POST /internal/tfg/agent-skill-versions/resolve`. Chunks to 50 FQNs.
+   * Caller supplies the token (caller JWT on save validate; service API key on turns).
+   * Failures: SFY HTTP errors from `#requestJson` (401/403/424/500); unexpected body → 500.
+   */
+  async resolveAgentSkillVersions(input: {
+    accessToken: string;
+    skills: readonly {
+      fqn: string;
+      include_skill_md_content?: boolean;
+      include_presigned_url?: boolean;
+    }[];
+  }): Promise<ResolvedAgentSkillVersion[]> {
+    if (input.skills.length === 0) {
+      return [];
+    }
+    const resolved: ResolvedAgentSkillVersion[] = [];
+    for (let i = 0; i < input.skills.length; i += AGENT_SKILL_RESOLVE_CHUNK_SIZE) {
+      const chunk = input.skills.slice(i, i + AGENT_SKILL_RESOLVE_CHUNK_SIZE);
+      const payload = await this.#requestJson({
+        url: this.#url(TFG_AGENT_SKILL_VERSIONS_RESOLVE_PATH),
+        accessToken: input.accessToken,
+        method: 'POST',
+        body: {
+          skills: chunk.map(({ fqn, include_skill_md_content = false, include_presigned_url = false }) => ({
+            fqn,
+            include_skill_md_content,
+            include_presigned_url,
+          })),
+        },
+      });
+      try {
+        resolved.push(...mapResolvedAgentSkillVersions(payload));
+      } catch (error) {
+        this.#logger.error('TrueFoundry ServiceFoundry resolve agent-skill-versions returned an unexpected response', {
+          ...extractErrorLogFields(error),
+        });
+        throw new HTTPException(500, {
+          message: 'TrueFoundry ServiceFoundry resolve agent-skill-versions returned an unexpected response',
+          cause: error,
+        });
+      }
+    }
+    return resolved;
+  }
+
+  /** Offset/limit list until empty page or `pagination.total`. */
+  async #listAllPages(input: {
+    path: string;
+    accessToken: string;
+    query?: Record<string, string>;
+    limit: number;
+  }): Promise<unknown[]> {
+    const items: unknown[] = [];
+    for (;;) {
+      const payload = await this.#requestJson({
+        url: this.#url(input.path, {
+          ...input.query,
+          offset: String(items.length),
+          limit: String(input.limit),
+        }),
+        accessToken: input.accessToken,
+        method: 'GET',
+      });
+      const response = this.#parseListResponse(payload);
+      const page = listPage(response);
+      items.push(...page);
+      const total = listPaginationTotal(response);
+      if (page.length === 0 || (total !== undefined && items.length >= total)) {
+        return items;
+      }
+    }
   }
 
   /** Per-subject authorize; includes a consent URL when auth is required. */
@@ -322,8 +479,8 @@ export class TrueFoundryServiceFoundryServerClient {
   }
 
   /**
-   * `GET v1/session` for RequestContext mapping.
-   * `user: null` (invalid/missing auth on a 200) → 401; all other failures → 500.
+   * `GET v1/session` for RequestContext mapping (always called with a bearer token).
+   * SFY optional-auth soft failure (`user: null` on 200) → 401; malformed → 500.
    */
   async getSession(accessToken: string): Promise<GetSessionResponse> {
     let payload: unknown;
@@ -352,7 +509,91 @@ export class TrueFoundryServiceFoundryServerClient {
     if (parsed.data.user === null) {
       throw new HTTPException(401, { message: 'Authentication required' });
     }
-    return { user: parsed.data.user };
+    return parsed.data;
+  }
+
+  async getAgentPermissions(input: {
+    accessToken: string;
+    externalIds?: readonly string[];
+  }): Promise<AgentPermissions> {
+    const payload = await this.#requestJson({
+      url: this.#url(AGENT_PERMISSIONS_PATH, {
+        resourceType: 'agent',
+        v2: 'true',
+        ...(input.externalIds === undefined ? {} : { resourceIds: JSON.stringify(input.externalIds) }),
+      }),
+      accessToken: input.accessToken,
+      method: 'GET',
+    });
+    const parsed = AgentPermissionsSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.#logger.error('TrueFoundry ServiceFoundry agent permissions response was malformed', {
+        ...extractErrorLogFields(parsed.error),
+      });
+      throw new HTTPException(424, {
+        message: 'TrueFoundry ServiceFoundry agent permissions response was malformed',
+        cause: parsed.error,
+      });
+    }
+    return parsed.data;
+  }
+
+  /**
+   * `GET v1/authorize/permissions?resourceType=tenant&v2=true` — flat action list
+   * (tenant + root-account merged), same as the platform FE Create Agent check.
+   */
+  async getTenantPermissions(input: { accessToken: string }): Promise<string[]> {
+    const payload = await this.#requestJson({
+      url: this.#url(AGENT_PERMISSIONS_PATH, { resourceType: 'tenant', v2: 'true' }),
+      accessToken: input.accessToken,
+      method: 'GET',
+    });
+    const parsed = z.array(z.string()).safeParse(payload);
+    if (!parsed.success) {
+      this.#logger.error('TrueFoundry ServiceFoundry tenant permissions response was malformed', {
+        ...extractErrorLogFields(parsed.error),
+      });
+      throw new HTTPException(424, {
+        message: 'TrueFoundry ServiceFoundry tenant permissions response was malformed',
+        cause: parsed.error,
+      });
+    }
+    return parsed.data;
+  }
+
+  /**
+   * Exchange a TrueFoundry API key for dual agent-scoped tokens.
+   * Wire `actorToken` is the agent identity (`asAgent`); wire `subjectToken` is the user with agent in `act` (`asUser`).
+   * Authenticated with the server API key, not the user bearer.
+   */
+  async vendToken(input: {
+    subject: { id: string; type: string; display_name: string };
+    agentId: string;
+    tenantName: string;
+  }): Promise<VendedTokens> {
+    const payload = await this.#requestJson({
+      url: this.#url(VEND_TOKEN_PATH),
+      accessToken: this.#apiKey,
+      method: 'POST',
+      body: {
+        identity: {
+          tenantName: input.tenantName,
+          subject: { id: input.subject.id, type: input.subject.type },
+          actor: { id: input.agentId, type: 'agent' },
+        },
+      },
+    });
+    const parsed = VendTokenResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      this.#logger.error('TrueFoundry ServiceFoundry vend-token response was malformed', {
+        ...extractErrorLogFields(parsed.error),
+      });
+      throw new HTTPException(424, {
+        message: 'TrueFoundry ServiceFoundry vend-token response was malformed',
+        cause: parsed.error,
+      });
+    }
+    return parsed.data;
   }
 
   #parseListResponse(payload: unknown): ListResponse {
@@ -393,6 +634,7 @@ export class TrueFoundryServiceFoundryServerClient {
     const headers: Record<string, string> = {
       accept: 'application/json',
       authorization: `Bearer ${input.accessToken}`,
+      ...this.#headers,
     };
     let body: string | undefined;
     if (input.body !== undefined) {
@@ -424,15 +666,16 @@ export class TrueFoundryServiceFoundryServerClient {
         cause: error,
       });
     }
-    this.#logger.info('TrueFoundry ServiceFoundry server request completed', {
+    this.#logger.debug('TrueFoundry ServiceFoundry server request completed', {
       url: input.url.href,
       method: input.method,
       status: response.status,
       durationMs: Date.now() - startedAt,
     });
     if (response.status === 401 || response.status === 403) {
+      const detail = await readServiceFoundryErrorMessage(response);
       throw new HTTPException(response.status, {
-        message: 'TrueFoundry ServiceFoundry server rejected the request',
+        message: `TrueFoundry ServiceFoundry server rejected the request: ${detail ?? `HTTP ${String(response.status)}`}`,
       });
     }
     if (response.status === 404 && input.notFoundOk) {

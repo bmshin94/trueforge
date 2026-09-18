@@ -3,9 +3,10 @@
 import { Icon } from '../icons/Icon.js';
 import { useOptionalCatalogServer, useServerCapabilities } from '../server/ServerContext.js';
 import { useOptionalShellMode } from '../server/ShellModeContext.js';
+import { isSettingsChromeEnabled } from '../server/serverChrome.js';
 import { useSlot } from '../theme/SlotsProvider.js';
 import { useTheme } from '../theme/ThemeProvider.js';
-import { auiButtonClass } from './lib/buttonClasses.js';
+import { auiButtonClass, sidebarRailButtonClassName } from './lib/buttonClasses.js';
 import { cn } from './lib/cn.js';
 
 export function ShellActions({ className, labeled = false }: { className?: string; labeled?: boolean }) {
@@ -16,18 +17,33 @@ export function ShellActions({ className, labeled = false }: { className?: strin
   const ActionSlot = useSlot('ShellActionsActionSlot');
   const isDark = mode === 'dark';
   const themeLabel = isDark ? 'Light' : 'Dark';
+  const settingsChromeEnabled = isSettingsChromeEnabled({ catalog, capabilities });
 
-  const labeledButtonClass =
-    'h-auto w-full flex-col gap-0.5 whitespace-normal px-1 py-1.5 text-[10px] leading-tight !justify-center';
+  const hoverClass = 'hover:bg-secondary-button-hover hover:text-ghost-button-text';
 
   return (
     <div
       className={cn(
-        'flex shrink-0 items-center gap-1 text-text-primary',
-        labeled && 'w-full flex-col gap-2',
+        'flex shrink-0 items-center gap-1',
+        labeled ? 'w-full flex-col items-center gap-1 text-sidebar-text' : 'text-text-primary',
         className,
       )}
     >
+      <a
+        href="https://trueforge.dev"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="Documentation"
+        title="Documentation"
+        className={auiButtonClass({
+          variant: 'ghost',
+          size: labeled ? undefined : 'icon',
+          className: cn(hoverClass, labeled && sidebarRailButtonClassName),
+        })}
+      >
+        <Icon name="book-open" size={labeled ? 14 : undefined} />
+        {labeled ? <span className="text-center">Docs</span> : null}
+      </a>
       <button
         type="button"
         aria-label={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
@@ -35,14 +51,14 @@ export function ShellActions({ className, labeled = false }: { className?: strin
         className={auiButtonClass({
           variant: 'ghost',
           size: labeled ? undefined : 'icon',
-          className: labeled ? labeledButtonClass : undefined,
+          className: cn(hoverClass, labeled && sidebarRailButtonClassName),
         })}
         onClick={() => setTheme(isDark ? 'light' : 'dark')}
       >
-        <Icon name={isDark ? 'sun' : 'moon'} size={labeled ? 16 : undefined} />
+        <Icon name={isDark ? 'sun' : 'moon'} size={labeled ? 14 : undefined} />
         {labeled ? <span className="text-center">{themeLabel}</span> : null}
       </button>
-      {shell != null && catalog != null && capabilities?.settings?.enabled !== false ? (
+      {shell != null && settingsChromeEnabled ? (
         <button
           type="button"
           aria-label="Settings"
@@ -53,14 +69,15 @@ export function ShellActions({ className, labeled = false }: { className?: strin
             variant: 'ghost',
             size: labeled ? undefined : 'icon',
             className: cn(
-              labeled ? labeledButtonClass : undefined,
+              hoverClass,
+              labeled && sidebarRailButtonClassName,
               shell.settingsOpen &&
-                'bg-primary-button-bg text-primary-button-text hover:bg-primary-button-hover hover:text-primary-button-text',
+                'bg-primary-button-bg font-medium text-primary-button-text hover:bg-primary-button-hover hover:text-primary-button-text',
             ),
           })}
           onClick={() => shell.setSettingsOpen(true)}
         >
-          <Icon name="settings" size={labeled ? 16 : undefined} />
+          <Icon name="settings" size={labeled ? 14 : undefined} />
           {labeled ? <span className="text-center">Settings</span> : null}
         </button>
       ) : null}

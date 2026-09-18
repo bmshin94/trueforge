@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { cn } from '../lib/cn.js';
@@ -10,11 +10,41 @@ export type DropdownMenuProps = {
   trigger: React.ReactNode;
   children: React.ReactNode;
   align?: 'start' | 'end';
+  side?: 'top' | 'bottom';
   className?: string;
+  containerClassName?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  closeOnClick?: boolean;
+  lockScroll?: boolean;
 };
 
-export function DropdownMenu({ trigger, children, align = 'end', className }: DropdownMenuProps) {
-  const [open, setOpen] = useState(false);
+// Returns true if the click was on the menu surface, not its contents or scrollbar.
+export function isSurfaceClick(event: React.MouseEvent<HTMLElement>): boolean {
+  return event.target === event.currentTarget;
+}
+
+export function DropdownMenu({
+  trigger,
+  children,
+  align = 'end',
+  side = 'bottom',
+  className,
+  containerClassName,
+  open: controlledOpen,
+  onOpenChange,
+  closeOnClick = true,
+  lockScroll = false,
+}: DropdownMenuProps) {
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = useCallback(
+    (nextOpen: boolean) => {
+      if (controlledOpen === undefined) setInternalOpen(nextOpen);
+      onOpenChange?.(nextOpen);
+    },
+    [controlledOpen, onOpenChange],
+  );
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -32,7 +62,7 @@ export function DropdownMenu({ trigger, children, align = 'end', className }: Dr
       if (!el) return;
       const rect = el.getBoundingClientRect();
       setPos({
-        top: rect.bottom + 4,
+        top: side === 'top' ? rect.top - 4 : rect.bottom + 4,
         left: align === 'end' ? rect.right : rect.left,
       });
     };
@@ -44,7 +74,7 @@ export function DropdownMenu({ trigger, children, align = 'end', className }: Dr
       window.removeEventListener('scroll', update, true);
       window.removeEventListener('resize', update);
     };
-  }, [open, align]);
+  }, [open, align, side]);
 
   useEffect(() => {
     if (!open) return;
@@ -58,6 +88,21 @@ export function DropdownMenu({ trigger, children, align = 'end', className }: Dr
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
+
+  useEffect(() => {
+    if (!open || !lockScroll) return;
+    const block = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && menuRef.current?.contains(target)) return;
+      event.preventDefault();
+    };
+    document.addEventListener('wheel', block, { passive: false, capture: true });
+    document.addEventListener('touchmove', block, { passive: false, capture: true });
+    return () => {
+      document.removeEventListener('wheel', block, { capture: true });
+      document.removeEventListener('touchmove', block, { capture: true });
+    };
+  }, [open, lockScroll]);
 
   // Menu mounts only after `pos` is set; focus once per open, not on every scroll/resize pos rewrite.
   useEffect(() => {
@@ -76,6 +121,7 @@ export function DropdownMenu({ trigger, children, align = 'end', className }: Dr
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
+        e.stopPropagation();
         setOpen(false);
         const triggerBtn = containerRef.current?.querySelector<HTMLElement>("[aria-haspopup='menu']");
         triggerBtn?.focus();
@@ -131,14 +177,25 @@ export function DropdownMenu({ trigger, children, align = 'end', className }: Dr
             style={{
               top: pos.top,
               left: pos.left,
-              transform: align === 'end' ? 'translateX(-100%)' : undefined,
+              transform:
+                [align === 'end' ? 'translateX(-100%)' : null, side === 'top' ? 'translateY(-100%)' : null]
+                  .filter(value => value !== null)
+                  .join(' ') || undefined,
             }}
             className={cn(
-              'fixed z-[200] min-w-[8rem] rounded-md border border-border bg-card-bg p-1',
+              'aui-popup-enter fixed z-[200] flex min-w-[8rem] flex-col overscroll-contain rounded-md border border-border bg-card-bg p-1',
               'text-text-primary shadow-md',
               className,
             )}
-            onClick={() => setOpen(false)}
+            onMouseDown={event => event.stopPropagation()}
+            onClick={
+              closeOnClick
+                ? event => {
+                    if (isSurfaceClick(event)) return;
+                    setOpen(false);
+                  }
+                : undefined
+            }
           >
             {children}
           </div>,
@@ -147,8 +204,10 @@ export function DropdownMenu({ trigger, children, align = 'end', className }: Dr
       : null;
 
   return (
-    <div ref={containerRef} className="relative inline-flex">
-      <div onClick={() => setOpen(v => !v)}>{triggerEl}</div>
+    <div ref={containerRef} className={cn('relative inline-flex', containerClassName)}>
+      <div className="contents" onClick={() => setOpen(!open)}>
+        {triggerEl}
+      </div>
       {menu}
     </div>
   );
@@ -163,8 +222,9 @@ export function DropdownMenuItem({ className, ...props }: DropdownMenuItemProps)
       type="button"
       className={cn(
         'flex w-full cursor-pointer select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none',
+        // focus-visible only: open-menu auto-focus must not look like a stuck hover/selected row.
         'transition-colors hover:bg-ghost-button-hover',
-        'focus:bg-dropdown-selected-item-bg focus:text-dropdown-selected-item-text',
+        'focus-visible:bg-dropdown-selected-item-bg focus-visible:text-dropdown-selected-item-text',
         'aria-selected:bg-dropdown-selected-item-bg aria-selected:text-dropdown-selected-item-text',
         'disabled:pointer-events-none disabled:opacity-50',
         className,

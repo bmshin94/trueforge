@@ -1,7 +1,13 @@
 import type { CreatedBySubject } from '@truefoundry/trueforge-core/agent-session';
 import type { Context } from 'hono';
 
-import configuration, { getTrueForgeMode, isOidcConfigured, TrueForgeMode } from '../config';
+import configuration, {
+  getTrueForgeAuthMode,
+  isOidcConfigured,
+  isTrueFoundryModeEnabled,
+  TrueForgeAuthMode,
+} from '../config';
+import { createTrueFoundryRequestContext } from '../truefoundry/accessToken';
 
 /** Standalone / default TrueForge admin role string. */
 export const STANDALONE_ADMIN_ROLE = 'admin';
@@ -49,26 +55,52 @@ export function resolveRequestContext(c: Context): RequestContext {
 
 /**
  * Whether the caller is treated as admin for settings, capabilities, and schedule bypass.
- * Mode and OIDC admin claim value come from process config ({@link getTrueForgeMode}).
+ * Mode and OIDC admin claim value come from process config ({@link getTrueForgeAuthMode}).
  * - Standalone: `roles` includes `admin`
  * - OIDC: `roles` includes configured `OIDC_ADMIN_ROLE_VALUE`
  * - TrueFoundry: no tenant-wide TrueForge admin
  */
 // TODO (chiragjn): hasAdminRole will be renamed to canAccessSettings once all authorizer changes are done
 export function hasAdminRole(requestContext: Pick<RequestContext, 'roles'>): boolean {
-  switch (getTrueForgeMode()) {
-    case TrueForgeMode.TrueFoundry:
+  switch (getTrueForgeAuthMode()) {
+    case TrueForgeAuthMode.TrueFoundry:
       return false;
-    case TrueForgeMode.Oidc: {
+    case TrueForgeAuthMode.Oidc: {
       if (!isOidcConfigured(configuration)) {
-        // this is technically unreachable since case TrueForgeMode.Oidc already ensures OIDC is configured
+        // this is technically unreachable since case TrueForgeAuthMode.Oidc already ensures OIDC is configured
         return false;
       }
       return requestContext.roles.includes(configuration.OIDC.OIDC_ADMIN_ROLE_VALUE);
     }
-    case TrueForgeMode.Standalone:
+    case TrueForgeAuthMode.Standalone:
       return requestContext.roles.includes(STANDALONE_ADMIN_ROLE);
   }
+}
+
+/** Subject rebuilt from a stored creator snapshot, for work that runs without a live request. */
+export function requestSubjectFromCreatedBySubject(subject: CreatedBySubject): RequestSubject {
+  return {
+    id: subject.subject_id,
+    type: subject.subject_type,
+    display_name: subject.subject_display_name,
+  };
+}
+
+/**
+ * Request identity for store resolvers and other work that runs as a persisted creator
+ * (schedule dispatch, etc.), not as the live HTTP caller.
+ */
+export function requestContextFromCreatedBySubject(params: {
+  tenant_id: string;
+  created_by_subject: CreatedBySubject;
+}): RequestContext {
+  const base: RequestContext = {
+    tenant_id: params.tenant_id,
+    subject: requestSubjectFromCreatedBySubject(params.created_by_subject),
+    roles: [],
+    user_credential: null,
+  };
+  return isTrueFoundryModeEnabled(configuration) ? createTrueFoundryRequestContext(base) : base;
 }
 
 /** Persistable creator snapshot derived from the authenticated request. */

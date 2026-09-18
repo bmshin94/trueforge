@@ -8,9 +8,13 @@ import { AgentsLibraryButton } from '@/atoms/AgentsLibraryButton.js';
 import { CenteredModal } from '@/atoms/primitives/CenteredModal.js';
 import { ServerProvider } from '@/server/ServerContext.js';
 import { ShellModeProvider, useShellMode } from '@/server/ShellModeContext.js';
-import type { AgentUIServer } from '@/server/types.js';
+import type { AgentUIServer, ListPermissionsResponse } from '@/server/types.js';
 import { SlotsProvider } from '@/theme/SlotsProvider.js';
-import { createMockAgentUIServer } from '../server/mockServer.js';
+import {
+  createMockAgentSessionsServer,
+  createMockAgentUIServer,
+  createMockScheduleServer,
+} from '../server/mockServer.js';
 
 beforeAll(() => {
   // jsdom does not implement HTMLDialogElement showModal/close.
@@ -31,11 +35,16 @@ function mockServer(
   agents: Array<{
     name: string;
     agentId: string;
+    description?: string;
     agentSpec?: {
       model: { name: string };
-      description?: string;
       skills?: Array<{ id: string; name: string }>;
       mcpServers?: Array<{ id: string; name: string }>;
+    };
+    createdBySubject?: {
+      subjectId: string;
+      subjectType: string;
+      subjectDisplayName: string;
     };
   }> = [{ name: 'alpha-agent', agentId: 'alpha-agent' }],
 ): AgentUIServer {
@@ -137,7 +146,12 @@ describe('AgentsLibrary', () => {
 
   it('lists agents and selects a named agent (Try = immutable)', async () => {
     const server = mockServer([
-      { name: 'alpha-agent', agentId: 'alpha-agent' },
+      {
+        name: 'alpha-agent',
+        agentId: 'alpha-agent',
+        description: 'Alpha handles triage.',
+        agentSpec: { model: { name: 'openai/gpt-4.1' } },
+      },
       { name: 'beta-agent', agentId: 'beta-agent' },
     ]);
     const onSelectAgent = vi.fn();
@@ -149,6 +163,7 @@ describe('AgentsLibrary', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Try agent alpha-agent' })).toBeInTheDocument();
     });
+    expect(screen.getByText('Alpha handles triage.')).toHaveClass('truncate');
 
     fireEvent.click(screen.getByRole('button', { name: 'Try agent beta-agent' }));
     expect(onSelectAgent).toHaveBeenCalledWith('beta-agent');
@@ -157,7 +172,35 @@ describe('AgentsLibrary', () => {
     });
   });
 
-  it('shows Edit when composer is enabled and agentSpec is present', async () => {
+  it('truncates long descriptions without hiding Try, and skips name-echo descriptions', async () => {
+    const longDescription = `${'Lorem ipsum dolor sit amet, '.repeat(20)}consectetur.`;
+    const server = mockServer([
+      {
+        name: 'verbose-agent',
+        agentId: 'verbose-agent',
+        description: longDescription,
+        agentSpec: { model: { name: 'openai/gpt-4.1' } },
+      },
+      {
+        name: 'echo-agent',
+        agentId: 'echo-agent',
+        description: 'echo-agent',
+        agentSpec: { model: { name: 'openai/gpt-4.1' } },
+      },
+    ]);
+
+    renderLibrary(<LibraryHarness />, { server });
+    fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Try agent verbose-agent' })).toBeInTheDocument();
+    });
+    expect(screen.getByRole('columnheader', { name: 'Configuration' })).toBeInTheDocument();
+    expect(screen.getByText(longDescription)).toHaveClass('truncate');
+    expect(screen.queryByText('echo-agent', { selector: '.text-xs' })).not.toBeInTheDocument();
+  });
+
+  it('shows Edit/Clone/Delete when composer is enabled and agentSpec is present', async () => {
     const server = mockServer([
       {
         name: 'writer',
@@ -177,11 +220,135 @@ describe('AgentsLibrary', () => {
     const actions = await screen.findByRole('button', { name: 'Actions for writer' });
     fireEvent.click(actions);
     expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Actions for try-only' })).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Clone' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
+    fireEvent.click(actions); // close without dismissing the library (Escape closes library)
+
+    // No spec → Edit/Clone hidden; Delete still available.
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for try-only' }));
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Clone' })).not.toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try agent try-only' })).toBeInTheDocument();
   });
 
-  it('shows model name, skills count, and MCP count from agentSpec', async () => {
+  it('keeps Try and Clone available with USE while disabling Edit and Delete', async () => {
+    const server = createMockAgentUIServer({
+      searchAgents: vi.fn(async () => [
+        {
+          name: 'shared-agent',
+          agentId: 'shared-id',
+          agentSpec: { model: { name: 'openai/gpt-5' } },
+        },
+      ]),
+      permissions: {
+        listPermissions: vi.fn(async (): Promise<ListPermissionsResponse> => ({
+          data: { type: 'agent', permissions: { 'shared-id': ['USE'] } },
+        })),
+      },
+      sessions: createMockAgentSessionsServer(),
+      schedules: createMockScheduleServer(),
+    });
+
+    renderLibrary(<LibraryHarness />, { server });
+    fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Try agent shared-agent' })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for shared-agent' }));
+    await waitFor(() => {
+      expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeDisabled();
+      expect(screen.getByRole('menuitem', { name: 'Manage Schedules' })).toBeEnabled();
+      expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeDisabled();
+    });
+    expect(screen.getByRole('menuitem', { name: 'Clone' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for shared-agent' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Add schedule for shared-agent' })).toBeEnabled();
+    });
+  });
+
+  it('clones an agent after confirm and stays on the library', async () => {
+    const saveAgent = vi.fn(async () => ({ agentId: 'writer-copy-id' }));
+    const server = createMockAgentUIServer({
+      searchAgents: vi.fn(async () => [
+        {
+          name: 'writer',
+          agentId: 'writer-id',
+          description: 'Writes release notes.',
+          agentSpec: { model: { name: 'openai-main/gpt-4.1' } },
+        },
+      ]),
+      saveAgent,
+      deleteAgent: vi.fn(async () => {}),
+    });
+
+    renderLibrary(<LibraryHarness />, {
+      server,
+      agentConfig: { mode: 'AgentLibraryWithComposer' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for writer' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clone' }));
+
+    expect(screen.getByRole('dialog', { name: 'Clone agent' })).toBeInTheDocument();
+    expect(screen.getByText(/This will create “writer-copy”/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clone' }));
+
+    await waitFor(() => {
+      expect(saveAgent).toHaveBeenCalledWith({
+        agentName: 'writer-copy',
+        description: 'Writes release notes.',
+        agentSpec: { model: { name: 'openai-main/gpt-4.1' } },
+        intent: 'create',
+      });
+    });
+    expect(screen.getByRole('heading', { name: 'Agents' })).toBeInTheDocument();
+  });
+
+  it('deletes an agent only after the confirmation dialog is accepted', async () => {
+    const deleteAgent = vi.fn(async () => {});
+    const server = createMockAgentUIServer({
+      searchAgents: vi.fn(async () => [
+        {
+          name: 'writer',
+          agentId: 'writer-id',
+          agentSpec: { model: { name: 'openai-main/gpt-4.1' } },
+        },
+      ]),
+      deleteAgent,
+    });
+
+    renderLibrary(<LibraryHarness />, {
+      server,
+      agentConfig: { mode: 'AgentLibraryWithComposer' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for writer' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+
+    expect(screen.getByRole('dialog', { name: 'Delete agent' })).toBeInTheDocument();
+    expect(screen.getByText(/including any schedules for this agent/)).toBeInTheDocument();
+    expect(deleteAgent).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog', { name: 'Delete agent' })).not.toBeInTheDocument();
+    expect(deleteAgent).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for writer' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => {
+      expect(deleteAgent).toHaveBeenCalledWith({ agentName: 'writer' });
+    });
+    expect(screen.getByRole('heading', { name: 'Agents' })).toBeInTheDocument();
+  });
+
+  it('shows model, skills, and connector under a Configuration column with tooltips', async () => {
     const server = mockServer([
       {
         name: 'algo-art',
@@ -203,12 +370,14 @@ describe('AgentsLibrary', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
 
     await waitFor(() => {
-      expect(screen.getByText('gpt-5-5')).toBeInTheDocument();
+      expect(screen.getByRole('columnheader', { name: 'Configuration' })).toBeInTheDocument();
     });
+    expect(screen.getByLabelText('openai/gpt-5-5')).toBeInTheDocument();
+    expect(screen.getByText('gpt-5-5')).toBeInTheDocument();
     expect(screen.getByLabelText('Connectors: github')).toBeInTheDocument();
     expect(screen.getByLabelText('Skills: paint')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try agent bare' })).toBeInTheDocument();
-    expect(screen.queryByLabelText('0 skills')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Configuration unavailable for bare')).toBeInTheDocument();
   });
 
   it('hides Edit when composer is disabled (AgentLibrary only)', async () => {
@@ -241,7 +410,8 @@ describe('AgentsLibrary', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
 
     await waitFor(() => {
-      expect(screen.getByText('No agents yet. Build one in a chat, then save it as an agent.')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'No Agents Found' })).toBeInTheDocument();
+      expect(screen.getByText('Build one in a chat, then save it as an agent.')).toBeInTheDocument();
     });
   });
 
@@ -255,9 +425,11 @@ describe('AgentsLibrary', () => {
     fireEvent.change(screen.getByPlaceholderText('Search agents'), { target: { value: 'zzz' } });
 
     await waitFor(() => {
-      expect(screen.getByText('No agents match "zzz".')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: 'No Agents Found' })).toBeInTheDocument();
+      expect(screen.getByText('zzz')).toBeInTheDocument();
+      expect(screen.getByText(/No search results found for/)).toBeInTheDocument();
     });
-    expect(screen.queryByText('No agents yet. Build one in a chat, then save it as an agent.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Build one in a chat, then save it as an agent.')).not.toBeInTheDocument();
   });
 
   it('closes via Escape', () => {
@@ -354,7 +526,7 @@ describe('AgentsLibraryButton', () => {
     expect(searchAgents).not.toHaveBeenCalled();
   });
 
-  it('shows a schedules count badge for visible agents and opens schedules on click', async () => {
+  it('routes schedule actions to the agent Schedules tab', async () => {
     const listSchedules = vi.fn(async () => ({
       data: [
         {
@@ -386,6 +558,12 @@ describe('AgentsLibraryButton', () => {
         { name: 'alpha-agent', agentId: 'alpha-agent' },
         { name: 'beta-agent', agentId: 'beta-agent' },
       ]),
+      sessions: {
+        getAgent: vi.fn(),
+        getCodeSnippets: vi.fn(),
+        listSessions: vi.fn(async () => ({ data: [] })),
+        listSessionEvents: vi.fn(async () => ({ data: [] })),
+      },
       schedules: {
         listSchedules,
         getSchedule: vi.fn(),
@@ -397,17 +575,7 @@ describe('AgentsLibraryButton', () => {
       },
     });
 
-    function SchedulesOpenProbe() {
-      const shell = useShellMode();
-      return <output data-testid="schedules-open">{shell.schedulesOpen ? 'yes' : 'no'}</output>;
-    }
-
-    renderLibrary(
-      <LibraryHarness>
-        <SchedulesOpenProbe />
-      </LibraryHarness>,
-      { server },
-    );
+    renderLibrary(<LibraryHarness />, { server });
     fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
 
     await waitFor(() => {
@@ -416,21 +584,39 @@ describe('AgentsLibraryButton', () => {
       );
     });
 
-    const badge = await screen.findByRole('button', { name: /2 schedules for alpha-agent/ });
-    expect(badge).toHaveTextContent('2');
+    const badge = await screen.findByRole('button', { name: /schedules for alpha-agent/ });
+    expect(badge).toHaveTextContent('1 Active');
+    expect(badge).toHaveTextContent('1 Paused');
+    expect(badge).toHaveAccessibleName('1 active, 1 paused schedules for alpha-agent');
+
+    fireEvent.mouseEnter(screen.getByText('1 Active').parentElement!);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('job-b');
+    fireEvent.mouseLeave(screen.getByText('1 Active').parentElement!);
+
+    fireEvent.mouseEnter(screen.getByText('1 Paused').parentElement!);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('job-a');
+    fireEvent.mouseLeave(screen.getByText('1 Paused').parentElement!);
+
     const addSchedule = screen.getByRole('button', { name: 'Add schedule for beta-agent' });
-    expect(addSchedule).toHaveTextContent('-');
+    expect(addSchedule).toHaveTextContent('Schedule');
 
     fireEvent.click(addSchedule);
-    expect(screen.getByTestId('schedules-open')).toHaveTextContent('yes');
-    expect(new URL(window.location.href).searchParams.get('agent')).toBe('beta-agent');
+    expect(screen.getByTestId('library-agent-id')).toHaveTextContent('beta-agent');
+    expect(new URL(window.location.href).searchParams.get('agentId')).toBe('beta-agent');
+    expect(new URL(window.location.href).searchParams.get('tab')).toBe('schedules');
+    expect(new URL(window.location.href).searchParams.get('agent')).toBeNull();
     expect(new URL(window.location.href).searchParams.get('isNew')).toBe('true');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
-    await screen.findByRole('button', { name: /2 schedules for alpha-agent/ });
-    fireEvent.click(screen.getByRole('button', { name: /2 schedules for alpha-agent/ }));
-    expect(new URL(window.location.href).searchParams.get('agent')).toBe('alpha-agent');
+    fireEvent.click(screen.getByRole('button', { name: /schedules for alpha-agent/ }));
+    expect(screen.getByTestId('library-agent-id')).toHaveTextContent('alpha-agent');
+    expect(new URL(window.location.href).searchParams.get('agentId')).toBe('alpha-agent');
+    expect(new URL(window.location.href).searchParams.get('tab')).toBe('schedules');
     expect(new URL(window.location.href).searchParams.get('isNew')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for alpha-agent' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Manage Schedules' }));
+    expect(screen.getByTestId('library-agent-id')).toHaveTextContent('alpha-agent');
+    expect(new URL(window.location.href).searchParams.get('tab')).toBe('schedules');
   });
 
   it('does not show an empty-schedules action before schedule counts load', async () => {
@@ -463,5 +649,86 @@ describe('AgentsLibraryButton', () => {
 
     resolveSchedules({ data: [] });
     expect(await screen.findByRole('button', { name: 'Add schedule for alpha-agent' })).toBeInTheDocument();
+  });
+
+  it('disables next page when the current page is short', async () => {
+    renderLibrary(<LibraryHarness />, { server: mockServer([{ name: 'alpha-agent', agentId: 'alpha-agent' }]) });
+    fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
+
+    await screen.findByRole('button', { name: 'Try agent alpha-agent' });
+    expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
+  });
+
+  it('paginates with next and previous and resets offset when page size changes', async () => {
+    const all = Array.from({ length: 15 }, (_, i) => ({
+      name: `agent-${String(i).padStart(2, '0')}`,
+      agentId: `agent-${i}`,
+    }));
+    const searchAgents = vi.fn(async ({ limit = 10, offset = 0 }: { limit?: number; offset?: number } = {}) =>
+      all.slice(offset, offset + limit),
+    );
+    const server = createMockAgentUIServer({ searchAgents });
+
+    renderLibrary(<LibraryHarness />, { server });
+    fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
+
+    await screen.findByRole('button', { name: 'Try agent agent-00' });
+    expect(searchAgents).toHaveBeenLastCalledWith({ query: undefined, limit: 10, offset: 0 });
+    expect(screen.getByRole('button', { name: 'Next page' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => {
+      expect(searchAgents).toHaveBeenLastCalledWith({ query: undefined, limit: 10, offset: 10 });
+    });
+    await screen.findByRole('button', { name: 'Try agent agent-10' });
+    expect(screen.getByRole('button', { name: 'Previous page' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Previous page' }));
+    await waitFor(() => {
+      expect(searchAgents).toHaveBeenLastCalledWith({ query: undefined, limit: 10, offset: 0 });
+    });
+    await screen.findByRole('button', { name: 'Try agent agent-00' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
+    await waitFor(() => {
+      expect(searchAgents).toHaveBeenLastCalledWith({ query: undefined, limit: 10, offset: 10 });
+    });
+
+    // PopoverSelect: open rows-per-page and pick 25
+    fireEvent.click(screen.getByRole('button', { name: 'Rows per page' }));
+    fireEvent.click(await screen.findByRole('option', { name: '25' }));
+    await waitFor(() => {
+      expect(searchAgents).toHaveBeenLastCalledWith({ query: undefined, limit: 25, offset: 0 });
+    });
+  });
+
+  it('shows Created by when agents include createdBySubject', async () => {
+    const server = mockServer([
+      {
+        name: 'alpha-agent',
+        agentId: 'alpha-agent',
+        createdBySubject: {
+          subjectId: 'u1',
+          subjectType: 'user',
+          subjectDisplayName: 'alice@example.com',
+        },
+      },
+    ]);
+    renderLibrary(<LibraryHarness />, { server });
+    fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
+
+    expect(await screen.findByRole('columnheader', { name: 'Created by' })).toBeInTheDocument();
+    expect(screen.getByText('alice@example.com')).toBeInTheDocument();
+    expect(document.querySelector('[data-slot="avatar-fallback"]')).toHaveTextContent(/^A$/);
+  });
+
+  it('hides Created by when no agent has createdBySubject', async () => {
+    renderLibrary(<LibraryHarness />, { server: mockServer() });
+    fireEvent.click(screen.getByRole('button', { name: 'Open library' }));
+    await screen.findByRole('button', { name: 'Try agent alpha-agent' });
+    expect(screen.queryByRole('columnheader', { name: 'Created by' })).not.toBeInTheDocument();
   });
 });

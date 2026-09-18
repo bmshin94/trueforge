@@ -14,7 +14,7 @@ import { AgentDetailsTabs } from '../atoms/agent-details/AgentDetailsTabs.js';
 import { AgentDetailsUnavailable } from '../atoms/agent-details/AgentDetailsUnavailable.js';
 import { AgentMetricCard } from '../atoms/agent-details/AgentMetricCard.js';
 import { AgentMetricsTimeRangeFilter } from '../atoms/agent-details/AgentMetricsTimeRangeFilter.js';
-import { AgentMetricsView } from '../atoms/agent-details/AgentMetricsView.js';
+import { AgentMetricStatistics, AgentMetricsView } from '../atoms/agent-details/AgentMetricsView.js';
 import { AgentOverviewCard } from '../atoms/agent-details/AgentOverviewCard.js';
 import { AgentSessionDetailHeader } from '../atoms/agent-details/AgentSessionDetailHeader.js';
 import { AgentSessionListRow } from '../atoms/agent-details/AgentSessionListRow.js';
@@ -32,6 +32,7 @@ import type {
 } from '../atoms/agent-details/types.js';
 import { AgentLibraryRow, AgentsLibrary } from '../atoms/AgentsLibrary.js';
 import { AgentsLibraryButton } from '../atoms/AgentsLibraryButton.js';
+import { ApprovalNavBanner } from '../atoms/ApprovalNavBanner.js';
 import { AssistantMessageBubble } from '../atoms/AssistantMessageBubble.js';
 import { AttachmentCard } from '../atoms/AttachmentCard.js';
 import { AttachmentPickerButton } from '../atoms/AttachmentPickerButton.js';
@@ -43,18 +44,21 @@ import { ComposerLeftSection, ComposerRightSection, ComposerSendButton } from '.
 import { ComposerShell } from '../atoms/ComposerShell.js';
 import { AgentConfigEditors } from '../atoms/draft/AgentConfigEditors.js';
 import { AgentConfigPanel, AgentConfigSection } from '../atoms/draft/AgentConfigPanel.js';
+import { AgentCustomParametersEditor } from '../atoms/draft/AgentCustomParametersEditor.js';
+import { AgentInstructionsDrawer } from '../atoms/draft/AgentInstructionsDrawer.js';
 import { AgentMcpEditorContent } from '../atoms/draft/AgentMcpEditorContent.js';
 import { AgentModelConfigModal } from '../atoms/draft/AgentModelConfigModal.js';
 import { AgentModelEditorContent } from '../atoms/draft/AgentModelEditorContent.js';
 import { AgentModelSettingsContent } from '../atoms/draft/AgentModelSettingsContent.js';
 import { AgentResourceConfigModal } from '../atoms/draft/AgentResourceConfigModal.js';
 import { AgentResourceEditorContent } from '../atoms/draft/AgentResourceEditorContent.js';
+import { AgentRuntimeConfigDrawer } from '../atoms/draft/AgentRuntimeConfigDrawer.js';
 import { AgentRuntimeConfigFields } from '../atoms/draft/AgentRuntimeConfigFields.js';
-import { AgentRuntimeConfigModal } from '../atoms/draft/AgentRuntimeConfigModal.js';
 import { AgentRuntimeEditorContent } from '../atoms/draft/AgentRuntimeEditorContent.js';
 import { AgentSkillsEditorContent } from '../atoms/draft/AgentSkillsEditorContent.js';
 import { DraftAgentConfigTrigger } from '../atoms/draft/DraftAgentConfigTrigger.js';
 import { DraftCapabilitiesPanel } from '../atoms/draft/DraftCapabilitiesPanel.js';
+import { DraftComposerActionsMenu } from '../atoms/draft/DraftComposerActionsMenu.js';
 import { DraftComposerLeftSection, DraftComposerRightSection } from '../atoms/draft/DraftComposerSections.js';
 import { CatalogRow, ConnectorConnectButton, DraftCompositeSelector } from '../atoms/draft/DraftCompositeSelector.js';
 import { DraftModelSelector } from '../atoms/draft/DraftModelSelector.js';
@@ -66,11 +70,12 @@ import { MessageIndicator } from '../atoms/MessageIndicator.js';
 import { MessageTimestamp } from '../atoms/MessageTimestamp.js';
 import { MonacoEditorCore } from '../atoms/MonacoEditorCore.js';
 import { OpenUiFenceBlock } from '../atoms/OpenUiFenceBlock.js';
+import { PermissionGuard } from '../atoms/PermissionGuard.js';
 import { SandboxArtifactDownload } from '../atoms/SandboxArtifactDownload.js';
 import { SandboxToolCallCard } from '../atoms/SandboxToolCallCard.js';
 import { SaveAgentButton } from '../atoms/SaveAgentButton.js';
 import { SaveAgentForm } from '../atoms/SaveAgentForm.js';
-import { SaveAgentFormFields } from '../atoms/SaveAgentFormFields.js';
+import type { SchedulesPageProps } from '../atoms/schedules/SchedulesPage.js';
 import { SchedulesButton } from '../atoms/SchedulesButton.js';
 import { ScrollToBottomButton } from '../atoms/ScrollToBottomButton.js';
 import { SelectAgentEmptyState } from '../atoms/SelectAgentEmptyState.js';
@@ -92,6 +97,7 @@ import { ToolApprovalBar } from '../atoms/ToolApprovalBar.js';
 import { ToolCallCard } from '../atoms/ToolCallCard.js';
 import { ToolCallContentBlock } from '../atoms/ToolCallContentBlock.js';
 import { ToolGroupCard } from '../atoms/ToolGroupCard.js';
+import { UserAvatar } from '../atoms/UserAvatar.js';
 import { UserMessageActionBar } from '../atoms/UserMessageActionBar.js';
 import { UserMessageBubble } from '../atoms/UserMessageBubble.js';
 import { UserMessageEdit } from '../atoms/UserMessageEdit.js';
@@ -109,6 +115,10 @@ const AgentSessions: ComponentType<AgentSessionsProps> = lazy(async () => {
 const AgentCodeSnippets: ComponentType<AgentCodeSnippetsProps> = lazy(
   () => import('../atoms/agent-details/AgentCodeSnippets.js'),
 );
+const SchedulesPage: ComponentType<SchedulesPageProps> = lazy(async () => {
+  const mod = await import('../atoms/schedules/SchedulesPage.js');
+  return { default: mod.SchedulesPage };
+});
 const AgentSessionEventTimeline: ComponentType<AgentSessionEventTimelineProps> = lazy(async () => {
   const mod = await import('../atoms/agent-details/AgentSessionEventTimeline.js');
   return { default: mod.AgentSessionEventTimeline };
@@ -140,11 +150,15 @@ export const defaultSlots = {
   ComposerLeftSection,
   ComposerRightSection,
   ComposerSendButton,
+  PermissionGuard,
   DraftComposerLeftSection,
   DraftComposerRightSection,
   DraftAgentConfigTrigger,
   DraftCapabilitiesPanel,
+  DraftComposerActionsMenu,
+  AgentCustomParametersEditor,
   AgentConfigEditors,
+  AgentInstructionsDrawer,
   AgentModelEditorContent,
   AgentModelSettingsContent,
   AgentMcpEditorContent,
@@ -155,7 +169,7 @@ export const defaultSlots = {
   AgentConfigPanel,
   AgentConfigSection,
   AgentRuntimeConfigFields,
-  AgentRuntimeConfigModal,
+  AgentRuntimeConfigDrawer,
   AgentRuntimeEditorContent,
   DraftCompositeSelector,
   CatalogRow,
@@ -197,6 +211,7 @@ export const defaultSlots = {
   AgentsLibrary,
   AgentLibraryRow,
   AgentsLibraryButton,
+  ApprovalNavBanner,
   SessionsBrowserButton,
   AgentDetailsPage,
   AgentDetailsHeader,
@@ -208,6 +223,7 @@ export const defaultSlots = {
   AgentMetricsView,
   AgentMetricsTimeRangeFilter,
   AgentMetricCard,
+  AgentMetricStatistics,
   AgentMetricChart,
   AgentSessionDetailHeader,
   AgentSessionsFilters,
@@ -221,10 +237,10 @@ export const defaultSlots = {
   AgentSessions,
   AgentCodeSnippets,
   AgentCodeBlock,
+  SchedulesPage,
   SchedulesButton,
   SaveAgentButton,
   SaveAgentForm,
-  SaveAgentFormFields,
   SelectAgentEmptyState,
   ClearChatButton,
   ThreadListRowSkeleton,
@@ -239,4 +255,5 @@ export const defaultSlots = {
   Toast,
   ToastStack,
   ShellActionsActionSlot,
+  UserAvatar,
 } satisfies AtomSlots;

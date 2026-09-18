@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildPath,
+  buildSessionResumeHref,
   matchLocation,
   matchPath,
   placesEqual,
@@ -18,6 +19,7 @@ describe('resolveRoutesConfig', () => {
       library: '/library',
       libraryAgent: '/library/:agentId',
       schedules: '/schedules',
+      buildAgent: '/build-agent',
       agent: '/agents/:agentName',
       session: '/sessions/:sessionId',
       sessionsBrowser: '/sessions',
@@ -52,6 +54,7 @@ describe('buildPath', () => {
     expect(buildPath({ type: 'library' }, routes)).toBe('/library');
     expect(buildPath({ type: 'libraryAgent', agentId: 'agent/id' }, routes)).toBe('/library/agent%2Fid');
     expect(buildPath({ type: 'schedules' }, routes)).toBe('/schedules');
+    expect(buildPath({ type: 'buildAgent' }, routes)).toBe('/build-agent');
     expect(buildPath({ type: 'agent', agentName: 'code-helper' }, routes)).toBe('/agents/code-helper');
     expect(buildPath({ type: 'session', sessionId: 'abc123' }, routes)).toBe('/sessions/abc123');
     expect(buildPath({ type: 'sessionsBrowser' }, routes)).toBe('/sessions');
@@ -69,6 +72,17 @@ describe('buildPath', () => {
     expect(buildPath({ type: 'library' }, disabled)).toBeNull();
     expect(buildPath({ type: 'libraryAgent', agentId: 'x' }, disabled)).toBeNull();
     expect(buildPath({ type: 'agent', agentName: 'x' }, disabled)).toBeNull();
+  });
+
+  it('builds an absolute resume href with basename and cleared share search', () => {
+    const withBasename = resolveRoutesConfig({ basename: '/trueforge' });
+    expect(
+      buildSessionResumeHref({
+        sessionId: 'sess-1',
+        routes: withBasename,
+        href: 'https://app.example/trueforge/library/agent-1?sessionId=old&agentId=agent-1&theme=dark',
+      }),
+    ).toBe('https://app.example/trueforge/sessions/sess-1?theme=dark');
   });
 });
 
@@ -101,6 +115,13 @@ describe('sanitizeSearchForPlace', () => {
     );
     expect(sanitizeSearchForPlace({ type: 'library' }, scheduleSearch)).toBe('?theme=dark');
   });
+
+  it('keeps embedded schedule state on an agent Schedules tab', () => {
+    const search = '?theme=dark&agentId=agent-1&tab=schedules&agent=stale&status=paused&q=digest&isNew=true';
+    expect(sanitizeSearchForPlace({ type: 'libraryAgent', agentId: 'agent-1' }, search)).toBe(
+      '?theme=dark&agentId=agent-1&tab=schedules&status=paused&q=digest&isNew=true',
+    );
+  });
 });
 
 describe('matchPath', () => {
@@ -112,6 +133,7 @@ describe('matchPath', () => {
     expect(matchPath('/library', routes)).toEqual({ type: 'library' });
     expect(matchPath('/library/agent%2Fid', routes)).toEqual({ type: 'libraryAgent', agentId: 'agent/id' });
     expect(matchPath('/schedules', routes)).toEqual({ type: 'schedules' });
+    expect(matchPath('/build-agent', routes)).toEqual({ type: 'buildAgent' });
     expect(matchPath('/agents/a%2Fb', routes)).toEqual({ type: 'agent', agentName: 'a/b' });
     expect(matchPath('/sessions', routes)).toEqual({ type: 'sessionsBrowser' });
     expect(matchPath('/sessions/xyz', routes)).toEqual({ type: 'session', sessionId: 'xyz' });
@@ -141,6 +163,7 @@ describe('matchPath', () => {
       { type: 'library' as const },
       { type: 'libraryAgent' as const, agentId: 'agent id/1' },
       { type: 'schedules' as const },
+      { type: 'buildAgent' as const },
       { type: 'agent' as const, agentName: 'weird name/1' },
       { type: 'session' as const, sessionId: 'sess 9' },
       { type: 'sessionsBrowser' as const },

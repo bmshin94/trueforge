@@ -11,12 +11,13 @@
  * - `false`: Postgres + Redis (defaults to local trueforge credentials /
  *   `redis://localhost:6379`).
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import envPaths from 'env-paths';
+import { z } from 'zod';
 
 const DEFAULT_PORT = 8790;
 /** Loopback default; container images set HOST=0.0.0.0 so probes and Service traffic reach the process. */
@@ -37,7 +38,16 @@ const DEFAULT_POSTGRES_PASSWORD = 'trueforge';
 const DEFAULT_POSTGRES_DB = 'trueforge';
 const DEFAULT_POSTGRES_HOST = 'localhost';
 const DEFAULT_POSTGRES_PORT = 5432;
+/** Default Postgres schema for app tables + Kysely migration bookkeeping. */
+export const DEFAULT_POSTGRES_SCHEMA = 'trueforge';
 const DEFAULT_REDIS_URL = 'redis://localhost:6379';
+/** Unquoted Postgres identifier: letter/underscore start, then alnum/underscore, ≤63 chars. */
+const POSTGRES_SCHEMA_NAME_RE = /^[a-z_][a-z0-9_]{0,62}$/;
+/**
+ * Fixed local service credential when `STANDALONE=true` and `TRUEFORGE_API_KEY` is unset.
+ * Local testing only — not for distributed deployments.
+ */
+export const STANDALONE_TRUEFORGE_API_KEY = 'trueforge-standalone';
 
 const DEFAULT_OIDC_USER_REFERENCE_CLAIM = 'sub';
 const DEFAULT_OIDC_USER_DISPLAY_NAME_CLAIM = 'name';
@@ -52,6 +62,17 @@ const DEFAULT_OIDC_SCOPES = 'openid,profile,email';
 export interface GetEnvOptions {
   defaultValue?: string;
   required?: boolean;
+}
+
+const POSTGRES_SSL_MODES = ['disable', 'prefer', 'require', 'verify-ca', 'verify-full', 'no-verify'] as const;
+type PostgresSslMode = (typeof POSTGRES_SSL_MODES)[number];
+
+/** pg Pool `ssl` object fields (client certs / CA / no-verify). */
+export interface PostgresSslConfig {
+  cert?: string;
+  key?: string;
+  ca?: string;
+  rejectUnauthorized?: boolean;
 }
 
 function getEnv(key: string, options?: GetEnvOptions): string | undefined {
@@ -99,10 +120,9 @@ export function parseOidcScopes(raw: string): string[] {
 }
 
 /**
- * Parses `OIDC_ALLOWED_EMAILS`: comma-separated exact addresses and/or globs
- * (`*@company.com`). Empty / unset → no allowlist (any authenticated user may sign in).
+ * Parses a comma-separated env list (trim, drop empties). Empty / unset → `[]`.
  */
-export function parseOidcAllowedEmails(raw: string | undefined): string[] {
+export function parseCommaSeparatedEnvList(raw: string | undefined): string[] {
   if (raw === undefined || raw.trim() === '') {
     return [];
   }
@@ -110,6 +130,63 @@ export function parseOidcAllowedEmails(raw: string | undefined): string[] {
     .split(',')
     .map(part => part.trim())
     .filter(part => part.length > 0);
+}
+
+/**
+ * Parses `OIDC_ALLOWED_EMAILS`: comma-separated exact addresses and/or globs
+ * (`*@company.com`). Empty / unset → no allowlist (any authenticated user may sign in).
+ */
+export function parseOidcAllowedEmails(raw: string | undefined): string[] {
+  return parseCommaSeparatedEnvList(raw);
+}
+
+/**
+ * Parses `TRUEFOUNDRY_TENANT_ID_TO_ALLOWED_MODEL_PROVIDER_ACCOUNTS` JSON.
+ * Empty / unset → `{}` (no filtering).
+ */
+export function parseTenantIdToAllowedModelProviderAccounts(raw: string | undefined): Record<string, string[]> {
+  if (raw === undefined || raw.trim() === '') {
+    return {};
+  }
+  try {
+    return z.record(z.string(), z.array(z.string())).parse(JSON.parse(raw));
+  } catch (error) {
+    throw new Error(
+      'Environment variable TRUEFOUNDRY_TENANT_ID_TO_ALLOWED_MODEL_PROVIDER_ACCOUNTS must be a JSON object of tenant_id → string[]',
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * Parsed `TRUEFOUNDRY_WEB_SEARCH_PROVIDER` JSON. Empty / unset → `undefined` (feature off).
+ * Requires `name: "parallel"` and non-empty `api_key`.
+ */
+export interface TrueFoundryWebSearchProviderEnv {
+  name: 'parallel';
+  api_key: string;
+}
+
+export function parseTrueFoundryWebSearchProvider(
+  raw: string | undefined,
+): TrueFoundryWebSearchProviderEnv | undefined {
+  if (!raw?.trim()) {
+    return undefined;
+  }
+  try {
+    const parsed = z.record(z.string(), z.string()).parse(JSON.parse(raw));
+    const name = parsed['name']?.trim();
+    const apiKey = parsed['api_key']?.trim();
+    if (name !== 'parallel' || !apiKey) {
+      throw new Error('missing or unsupported name, or missing api_key');
+    }
+    return { name: 'parallel', api_key: apiKey };
+  } catch (error) {
+    throw new Error(
+      'Environment variable TRUEFOUNDRY_WEB_SEARCH_PROVIDER must be a JSON object with "name":"parallel" and non-empty "api_key" (e.g. {"name":"parallel","api_key":"..."})',
+      { cause: error },
+    );
+  }
 }
 
 /** Parses a positive-integer env var, falling back to `defaultValue` when unset/blank. */
@@ -141,29 +218,72 @@ function parseBoolean(options: { envKey: string; raw: string | undefined; defaul
   throw new Error(`Environment variable ${envKey} must be "true" or "false", got "${raw}"`);
 }
 
+function parsePostgresSchema(raw: string | undefined): string {
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_POSTGRES_SCHEMA;
+  }
+  const schema = raw.trim();
+  if (!POSTGRES_SCHEMA_NAME_RE.test(schema)) {
+    throw new Error(
+      `Environment variable POSTGRES_SCHEMA must be a lowercase Postgres identifier ` +
+        `(letter/underscore, then alnum/underscore, max 63 chars); got "${raw}"`,
+    );
+  }
+  return schema;
+}
+
+/**
+ * Empty stays empty. Otherwise parse as a URL, store without a trailing slash
+ * (callers join with `/`), and reject query/hash or `.` / `..` path segments.
+ */
+function parsePublicBaseUrl(raw: string | undefined): string {
+  if (raw === undefined || raw.trim() === '') {
+    return '';
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw.trim());
+  } catch (error) {
+    throw new Error('PUBLIC_BASE_URL must be a valid URL', { cause: error });
+  }
+  if (parsed.search !== '' || parsed.hash !== '') {
+    throw new Error('PUBLIC_BASE_URL must not include a query or hash');
+  }
+  const segments = parsed.pathname.split('/').filter(part => part.length > 0);
+  if (segments.some(part => part === '.' || part === '..')) {
+    throw new Error('PUBLIC_BASE_URL path must not contain "." or ".." segments');
+  }
+  const path = segments.length === 0 ? '' : `/${segments.join('/')}`;
+  return `${parsed.origin}${path}`;
+}
+
+function parseTrueFoundrySandboxProvider(raw: string | undefined): 'daytona' | 'truefoundry' | undefined {
+  if (raw === undefined || raw.trim() === '') {
+    return undefined;
+  }
+  const value = raw.trim();
+  if (value === 'daytona' || value === 'truefoundry') {
+    return value;
+  }
+  throw new Error(
+    `Environment variable TRUEFOUNDRY_SANDBOX_PROVIDER must be "daytona" or "truefoundry", got ${JSON.stringify(raw)}`,
+  );
+}
+
 /** Parses `POSTGRES_SSL_MODE`. Unset/blank → `''`. Unknown values throw. */
-function parsePostgresSslMode(raw: string | undefined): string {
-  if (!raw) {
+function validatePostgresSslMode(raw: string | undefined): PostgresSslMode | '' {
+  const mode = raw?.trim() ?? '';
+  if (!mode) {
     return '';
   }
-  const mode = raw.trim();
-  if (mode === '') {
-    return '';
+  for (const allowed of POSTGRES_SSL_MODES) {
+    if (mode === allowed) {
+      return allowed;
+    }
   }
-  switch (mode) {
-    case 'disable':
-    case 'prefer':
-    case 'require':
-    case 'verify-ca':
-    case 'verify-full':
-    case 'no-verify':
-      return mode;
-    default:
-      throw new Error(
-        'Environment variable POSTGRES_SSL_MODE must be one of disable, prefer, require, verify-ca, ' +
-          `verify-full, no-verify; got "${mode}"`,
-      );
-  }
+  throw new Error(
+    `Environment variable POSTGRES_SSL_MODE must be one of ${POSTGRES_SSL_MODES.join(', ')}; got "${mode}"`,
+  );
 }
 
 /**
@@ -229,6 +349,7 @@ function resolveRedisUrl(): string {
 /**
  * Postgres connection string for distributed mode.
  * Prefers `DATABASE_URL` when set (Railway / managed Postgres); otherwise builds from `POSTGRES_*`.
+ * TLS is not put on the URL — see `resolvePostgresSsl` / `DATABASE_SSL` (servicefoundry-style).
  */
 function resolvePostgresDatabaseUrl(): string {
   const databaseUrl = getEnv('DATABASE_URL');
@@ -246,7 +367,6 @@ function resolvePostgresDatabaseUrl(): string {
     raw: getEnv('POSTGRES_PORT'),
     defaultValue: DEFAULT_POSTGRES_PORT,
   });
-  const postgresSslMode = parsePostgresSslMode(getEnv('POSTGRES_SSL_MODE'));
   if (
     postgresUser.trim() === '' ||
     postgresPassword.trim() === '' ||
@@ -264,24 +384,61 @@ function resolvePostgresDatabaseUrl(): string {
     host: postgresHost,
     port: postgresPort,
     database: postgresDb,
-    sslMode: postgresSslMode,
   });
 }
 
-/** Builds a Postgres connection URL from discrete `POSTGRES_*` parts. */
+/**
+ * Postgres TLS for the pg Pool — same shape as servicefoundry `getSSLConfig`.
+ * Env: `POSTGRES_SSL_MODE`, `POSTGRES_SSL_CERT_PATH`, `POSTGRES_SSL_KEY_PATH`, `POSTGRES_SSL_CA_PATH`.
+ * Not written into `DATABASE_URL`. `prefer` / `require` / `verify-ca` / `verify-full` all map to
+ * `ssl: true` (or the cert object); use `no-verify` for encrypt-without-verify.
+ */
+function resolvePostgresSsl(): boolean | PostgresSslConfig {
+  const sslMode = getEnv('POSTGRES_SSL_MODE');
+  const cert = readOptionalFileContentsEnv('POSTGRES_SSL_CERT_PATH');
+  const key = readOptionalFileContentsEnv('POSTGRES_SSL_KEY_PATH');
+  // Cloud SQL / private CA often fail verify-full; Node cannot express verify-ca without hostname check.
+  const ca = readOptionalFileContentsEnv('POSTGRES_SSL_CA_PATH');
+
+  let ssl: boolean | PostgresSslConfig = false;
+  if (cert || key || ca) {
+    ssl = {
+      ...(cert ? { cert } : {}),
+      ...(key ? { key } : {}),
+      ...(ca ? { ca } : {}),
+    };
+  }
+
+  switch (validatePostgresSslMode(sslMode)) {
+    case 'disable':
+      return false;
+    case 'prefer':
+    case 'require':
+    case 'verify-ca':
+    case 'verify-full':
+      return ssl || true;
+    case 'no-verify':
+      return { ...(ssl || {}), rejectUnauthorized: false };
+    default:
+      return ssl;
+  }
+}
+
+/** Reads a PEM file from an optional path env; unset/blank → `undefined`. */
+function readOptionalFileContentsEnv(envKey: string): string | undefined {
+  const filePath = resolveOptionalPathEnv(envKey);
+  return filePath ? readFileSync(filePath, 'utf8') : undefined;
+}
+
+/** Builds a Postgres connection URL from discrete `POSTGRES_*` parts (no TLS query params). */
 function buildPostgresConnectionString(parts: {
   user: string;
   password: string;
   host: string;
   port: number;
   database: string;
-  sslMode: string;
 }): string {
-  let connectionString = `postgres://${encodeURIComponent(parts.user)}:${encodeURIComponent(parts.password)}@${parts.host}:${String(parts.port)}/${encodeURIComponent(parts.database)}`;
-  if (parts.sslMode !== '') {
-    connectionString += `?sslmode=${encodeURIComponent(parts.sslMode)}`;
-  }
-  return connectionString;
+  return `postgres://${encodeURIComponent(parts.user)}:${encodeURIComponent(parts.password)}@${parts.host}:${String(parts.port)}/${encodeURIComponent(parts.database)}`;
 }
 
 function resolveOIDCConfig(): OIDCConfig | undefined {
@@ -361,7 +518,7 @@ export interface OIDCConfig {
 export interface SharedServerConfiguration {
   /** Log level. Env: `LOG_LEVEL`. */
   LOG_LEVEL: string;
-  /** Log one line per HTTP request (except `/healthz`). Env: `ACCESS_LOGS`. Default true. */
+  /** Log one line per HTTP request (except `/healthz` and `/assets/`). Env: `ACCESS_LOGS`. Default true. */
   ACCESS_LOGS: boolean;
   /** Node environment. Env: `NODE_ENV`. */
   NODE_ENV: string | undefined;
@@ -405,6 +562,8 @@ export interface SharedServerConfiguration {
   MCP_REQUEST_TIMEOUT_MS: number;
   /** Max milliseconds for an MCP transport connection. Env: `MCP_CONNECT_TIMEOUT_MS`. Default 30 seconds. */
   MCP_CONNECT_TIMEOUT_MS: number;
+  /** Max bytes for one remote MCP tool-call HTTP response body (not GET SSE). Env: `MCP_TOOL_CALL_MAX_RESPONSE_BYTES`. Default 50 MB. */
+  MCP_TOOL_CALL_MAX_RESPONSE_BYTES: number;
   /**
    * Client name used for Dynamic Client Registration (DCR) of MCP servers.
    * This is the client name shown on authorization-server consent screens.
@@ -470,42 +629,38 @@ export interface SharedServerConfiguration {
    */
   REDIS_REQUEST_REPLY_POLL_INTERVAL_MS: number;
   /**
-   * Public base URL used as the origin of MCP OAuth and OIDC callbacks.
-   * Optional at boot; MCP OAuth and OIDC callback construction fail if empty
-   * outside standalone development. Env: `PUBLIC_BASE_URL`.
+   * Public application URL (origin plus optional pathname). Used as the origin of
+   * MCP OAuth and OIDC callbacks; the pathname is the UI/API public prefix when
+   * a reverse proxy strips it. Optional at boot; MCP OAuth and OIDC callback
+   * construction fail if empty outside standalone development. Env: `PUBLIC_BASE_URL`.
    */
   PUBLIC_BASE_URL: string;
   /**
-   * Base URL the controller uses to reach the server's HTTP API when it runs as its
-   * own process (`STANDALONE=false`, `dist/controller-main.js`). The control loops call
-   * the server over HTTP. Env: `SERVER_URL`. Default: `http://localhost:$PORT`,
-   * so in-cluster deployments MUST point this at the server Service. Unused in standalone
-   * mode, where the server process owns the controller and targets itself on localhost.
+   * Base URL the controller uses to reach the server's HTTP API. Dedicated controller
+   * (`STANDALONE=false`, `dist/controller-main.js`) and the in-process standalone controller
+   * both call the server over HTTP(S) at this URL (loopback in standalone). When
+   * `TRUEFORGE_MTLS_ENABLED` is true the controller upgrades an `http://` URL to `https://`
+   * and presents the client cert. Env: `SERVER_URL`.
+   * Default: `http://localhost:$PORT`; in-cluster deployments MUST point this at the server Service.
    */
   SERVER_URL: string;
   /**
-   * When set, models are listed from the TrueFoundry ServiceFoundry server and invoked
-   * via the AI Gateway with the caller's token. Unset = local model-provider store.
-   * Env: `TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL`.
+   * Service credential for controller calls.
+   * Env: `TRUEFORGE_API_KEY`. Required and non-empty when `STANDALONE=false`.
+   * Standalone defaults to {@link STANDALONE_TRUEFORGE_API_KEY} (local testing only).
    */
-  TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL: string | undefined;
-  /** Max ms for non-agent ServiceFoundry HTTP calls. Env: `TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS`. Default 10000. */
-  TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS: number;
-  /** Max ms for agent CRUD ServiceFoundry HTTP calls. Env: `TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS`. Default 3000. */
-  TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS: number;
+  TRUEFORGE_API_KEY: string;
   /**
-   * Present this pod's client certificate on outbound calls to the ServiceFoundry server (internal
-   * mutual TLS) and upgrade a mesh-direct peer URL from http to https. Off by default, so an
-   * unconfigured deployment keeps calling over plain HTTP exactly as before.
-   * Env: `TRUEFOUNDRY_MTLS_ENABLED`. Default false.
+   * Mutual TLS for this process's HTTPS listener and controller→server. When true, serves HTTPS
+   * with client-cert enforcement (except `/healthz`) and the controller presents a client cert.
+   * Env: `TRUEFORGE_MTLS_ENABLED`. Default false.
    */
-  TRUEFOUNDRY_MTLS_ENABLED: boolean;
+  TRUEFORGE_MTLS_ENABLED: boolean;
   /**
-   * Directory holding the internal mTLS material used when `TRUEFOUNDRY_MTLS_ENABLED` is true — the
-   * cert triple `tls.crt` / `tls.key` / `ca.crt`, so one chart value configures every component.
-   * Env: `TRUEFOUNDRY_MTLS_CERTS_DIR`. Default `/etc/tls/truefoundry`.
+   * Directory holding the TLS cert triple (`tls.crt` / `tls.key` / `ca.crt`) when
+   * `TRUEFORGE_MTLS_ENABLED` is true. Env: `TRUEFORGE_MTLS_CERTS_DIR`. Default `/etc/tls`.
    */
-  TRUEFOUNDRY_MTLS_CERTS_DIR: string;
+  TRUEFORGE_MTLS_CERTS_DIR: string;
 }
 
 export type StandaloneServerConfiguration = SharedServerConfiguration & {
@@ -538,11 +693,16 @@ export type DistributedServerConfiguration = SharedServerConfiguration & {
    */
   STANDALONE: false;
   /**
-   * Postgres connection string. Env: `DATABASE_URL` when set; otherwise built from `POSTGRES_*`
-   * (including optional `POSTGRES_SSL_MODE` as `sslmode`).
+   * Postgres connection string. Env: `DATABASE_URL` when set; otherwise built from `POSTGRES_*`.
    * Form: `postgres://USER:PASSWORD@HOST:PORT/DB` (or `postgresql://…`) with user/password URL-encoded.
+   * TLS is not encoded here — see `DATABASE_SSL`.
    */
   DATABASE_URL: string;
+  /**
+   * Postgres TLS for the pg Pool (servicefoundry-style).
+   * Env: `POSTGRES_SSL_MODE`, `POSTGRES_SSL_CERT_PATH`, `POSTGRES_SSL_KEY_PATH`, `POSTGRES_SSL_CA_PATH`.
+   */
+  DATABASE_SSL: boolean | PostgresSslConfig;
   /** Max connections in the `pg` Pool. Env: `DATABASE_POOL_MAX`. Default 10. */
   DATABASE_POOL_MAX: number;
   /**
@@ -555,6 +715,11 @@ export type DistributedServerConfiguration = SharedServerConfiguration & {
    * Env: `POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS`. Default 60000.
    */
   POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS: number;
+  /**
+   * Postgres schema for app tables and Kysely migration bookkeeping (`search_path`, Migrator).
+   * Env: `POSTGRES_SCHEMA`. Default `trueforge`.
+   */
+  POSTGRES_SCHEMA: string;
   /** Peering URL shared by all replicas. Env: `REDIS_URL`. Default `redis://localhost:6379`. */
   REDIS_URL: string;
   /**
@@ -562,6 +727,81 @@ export type DistributedServerConfiguration = SharedServerConfiguration & {
    * Undefined means browser login is disabled.
    */
   OIDC: OIDCConfig | undefined;
+  /**
+   * When set, models/MCP/agents are backed by the TrueFoundry ServiceFoundry server with the
+   * caller's token. Unset = local Postgres stores. Mutually exclusive with OIDC.
+   * Env: `TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL`.
+   */
+  /**
+   * When set, automatically move public TrueForge tables into `POSTGRES_SCHEMA` on first bootstrap.
+   * Env: `AUTOMATICALLY_MOVE_TRUEFORGE_TABLES_FROM_PUBLIC_TO_TRUEFORGE_SCHEMA`. Default true.
+   */
+  AUTOMATICALLY_MOVE_TRUEFORGE_TABLES_FROM_PUBLIC_TO_TRUEFORGE_SCHEMA: boolean;
+  /**
+   * The URL of the TrueFoundry ServiceFoundry server.
+   * Env: `TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL`.
+   */
+  TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL: string | undefined;
+  /**
+   * Required when `TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL` is set. Env: `TRUEFOUNDRY_API_KEY`.
+   */
+  TRUEFOUNDRY_API_KEY: string | undefined;
+  /** Max ms for non-agent ServiceFoundry HTTP calls. Env: `TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS`. Default 10000. */
+  TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS: number;
+  /** Max ms for agent CRUD ServiceFoundry HTTP calls. Env: `TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS`. Default 3000. */
+  TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS: number;
+  /**
+   * Present this pod's client certificate on outbound calls to the ServiceFoundry server (internal
+   * mutual TLS) and upgrade a mesh-direct peer URL from http to https. Off by default, so an
+   * unconfigured deployment keeps calling over plain HTTP exactly as before.
+   * Env: `TRUEFOUNDRY_MTLS_ENABLED`. Default false.
+   */
+  TRUEFOUNDRY_MTLS_ENABLED: boolean;
+  /**
+   * Directory holding the internal mTLS material used when `TRUEFOUNDRY_MTLS_ENABLED` is true — the
+   * cert triple `tls.crt` / `tls.key` / `ca.crt`, so one chart value configures every component.
+   * Env: `TRUEFOUNDRY_MTLS_CERTS_DIR`. Default `/etc/tls/truefoundry`.
+   */
+  TRUEFOUNDRY_MTLS_CERTS_DIR: string;
+  /**
+   * When TrueFoundry mode is on, enable the shared sandbox for all tenants
+   * (no per-tenant PUT). Env: `TRUEFOUNDRY_SANDBOX_ENABLED`. Default false.
+   */
+  TRUEFOUNDRY_SANDBOX_ENABLED: boolean;
+  /**
+   * Shared sandbox backend when `TRUEFOUNDRY_SANDBOX_ENABLED` is true.
+   * Env: `TRUEFOUNDRY_SANDBOX_PROVIDER` (`daytona` | `truefoundry`).
+   */
+  TRUEFOUNDRY_SANDBOX_PROVIDER: 'daytona' | 'truefoundry' | undefined;
+  /**
+   * Shared API key (required for Daytona; optional for truefoundry).
+   * Env: `TRUEFOUNDRY_SANDBOX_API_KEY`.
+   */
+  TRUEFOUNDRY_SANDBOX_API_KEY: string | undefined;
+  /**
+   * TrueFoundry (on-prem) sandbox HTTP server URL when provider is `truefoundry`.
+   * Env: `TRUEFOUNDRY_SANDBOX_SERVER_URL`.
+   */
+  TRUEFOUNDRY_SANDBOX_SERVER_URL: string | undefined;
+  /**
+   * Static JSON settings for the shared sandbox (provider-specific).
+   * Daytona: `snapshotName`, intervals, `timeoutMs`. TrueFoundry: `nats_bridge_url`.
+   * Env: `TRUEFOUNDRY_SANDBOX_SETTINGS`.
+   */
+  TRUEFOUNDRY_SANDBOX_SETTINGS: string | undefined;
+  /**
+   * Optional per-tenant allowlist of model provider account names. JSON object
+   * `Record<tenant_id, account_name[]>`. Empty / unset → no filtering. Tenants omitted from the
+   * map are unaffected; tenants present are limited to the listed provider accounts.
+   * Env: `TRUEFOUNDRY_TENANT_ID_TO_ALLOWED_MODEL_PROVIDER_ACCOUNTS`.
+   */
+  TRUEFOUNDRY_TENANT_ID_TO_ALLOWED_MODEL_PROVIDER_ACCOUNTS: Record<string, string[]>;
+  /**
+   * Optional built-in web search provider (TrueFoundry mode only). JSON object
+   * `Record<string, string>` with `name` (`parallel`) and `api_key`.
+   * Unset / empty → web search tools are not registered. Env: `TRUEFOUNDRY_WEB_SEARCH_PROVIDER`.
+   */
+  TRUEFOUNDRY_WEB_SEARCH_PROVIDER: TrueFoundryWebSearchProviderEnv | undefined;
 };
 
 export type ServerConfiguration = StandaloneServerConfiguration | DistributedServerConfiguration;
@@ -610,6 +850,11 @@ const shared: SharedServerConfiguration = {
     envKey: 'MCP_CONNECT_TIMEOUT_MS',
     raw: getEnv('MCP_CONNECT_TIMEOUT_MS'),
     defaultValue: 30 * 1000,
+  }),
+  MCP_TOOL_CALL_MAX_RESPONSE_BYTES: parsePositiveInt({
+    envKey: 'MCP_TOOL_CALL_MAX_RESPONSE_BYTES',
+    raw: getEnv('MCP_TOOL_CALL_MAX_RESPONSE_BYTES'),
+    defaultValue: 50 * 1024 * 1024,
   }),
   MCP_DCR_OAUTH_CLIENT_NAME:
     getEnv('MCP_DCR_OAUTH_CLIENT_NAME', { defaultValue: 'truefoundry-harness' }) ?? 'truefoundry-harness',
@@ -664,27 +909,18 @@ const shared: SharedServerConfiguration = {
     raw: getEnv('REDIS_REQUEST_REPLY_POLL_INTERVAL_MS'),
     defaultValue: 500,
   }),
-  PUBLIC_BASE_URL: getEnv('PUBLIC_BASE_URL', { defaultValue: '' }) ?? '',
+  PUBLIC_BASE_URL: parsePublicBaseUrl(getEnv('PUBLIC_BASE_URL', { defaultValue: '' })),
   SERVER_URL:
     getEnv('SERVER_URL', { defaultValue: `http://localhost:${String(port)}` }) ?? `http://localhost:${String(port)}`,
-  TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL: getEnv('TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL', { required: false }),
-  TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS: parsePositiveInt({
-    envKey: 'TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS',
-    raw: getEnv('TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS'),
-    defaultValue: 10_000,
-  }),
-  TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS: parsePositiveInt({
-    envKey: 'TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS',
-    raw: getEnv('TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS'),
-    defaultValue: 3_000,
-  }),
-  TRUEFOUNDRY_MTLS_ENABLED: parseBoolean({
-    envKey: 'TRUEFOUNDRY_MTLS_ENABLED',
-    raw: getEnv('TRUEFOUNDRY_MTLS_ENABLED'),
+  TRUEFORGE_API_KEY: standalone
+    ? (getEnv('TRUEFORGE_API_KEY', { defaultValue: STANDALONE_TRUEFORGE_API_KEY }) ?? STANDALONE_TRUEFORGE_API_KEY)
+    : (getEnv('TRUEFORGE_API_KEY', { required: true }) ?? ''),
+  TRUEFORGE_MTLS_ENABLED: parseBoolean({
+    envKey: 'TRUEFORGE_MTLS_ENABLED',
+    raw: getEnv('TRUEFORGE_MTLS_ENABLED'),
     defaultValue: false,
   }),
-  TRUEFOUNDRY_MTLS_CERTS_DIR:
-    getEnv('TRUEFOUNDRY_MTLS_CERTS_DIR', { defaultValue: '/etc/tls/truefoundry' }) ?? '/etc/tls/truefoundry',
+  TRUEFORGE_MTLS_CERTS_DIR: getEnv('TRUEFORGE_MTLS_CERTS_DIR', { defaultValue: '/etc/tls' }) ?? '/etc/tls',
 };
 
 const configuration: ServerConfiguration = standalone
@@ -699,6 +935,7 @@ const configuration: ServerConfiguration = standalone
       ...shared,
       STANDALONE: false,
       DATABASE_URL: resolvePostgresDatabaseUrl(),
+      DATABASE_SSL: resolvePostgresSsl(),
       DATABASE_POOL_MAX: parsePositiveInt({
         envKey: 'DATABASE_POOL_MAX',
         raw: getEnv('DATABASE_POOL_MAX'),
@@ -714,8 +951,50 @@ const configuration: ServerConfiguration = standalone
         raw: getEnv('POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS'),
         defaultValue: 60_000,
       }),
+      POSTGRES_SCHEMA: parsePostgresSchema(getEnv('POSTGRES_SCHEMA')),
       REDIS_URL: resolveRedisUrl(),
       OIDC: resolveOIDCConfig(),
+      AUTOMATICALLY_MOVE_TRUEFORGE_TABLES_FROM_PUBLIC_TO_TRUEFORGE_SCHEMA: parseBoolean({
+        envKey: 'AUTOMATICALLY_MOVE_TRUEFORGE_TABLES_FROM_PUBLIC_TO_TRUEFORGE_SCHEMA',
+        raw: getEnv('AUTOMATICALLY_MOVE_TRUEFORGE_TABLES_FROM_PUBLIC_TO_TRUEFORGE_SCHEMA'),
+        defaultValue: true,
+      }),
+      TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL: getEnv('TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL', { required: false }),
+      TRUEFOUNDRY_API_KEY: getEnv('TRUEFOUNDRY_API_KEY', { required: false }),
+      TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS: parsePositiveInt({
+        envKey: 'TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS',
+        raw: getEnv('TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_TIMEOUT_MS'),
+        defaultValue: 10_000,
+      }),
+      TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS: parsePositiveInt({
+        envKey: 'TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS',
+        raw: getEnv('TRUEFOUNDRY_SERVICEFOUNDRY_HTTP_AGENT_TIMEOUT_MS'),
+        defaultValue: 3_000,
+      }),
+      TRUEFOUNDRY_MTLS_ENABLED: parseBoolean({
+        envKey: 'TRUEFOUNDRY_MTLS_ENABLED',
+        raw: getEnv('TRUEFOUNDRY_MTLS_ENABLED'),
+        defaultValue: false,
+      }),
+      TRUEFOUNDRY_MTLS_CERTS_DIR:
+        getEnv('TRUEFOUNDRY_MTLS_CERTS_DIR', { defaultValue: '/etc/tls/truefoundry' }) ?? '/etc/tls/truefoundry',
+      TRUEFOUNDRY_SANDBOX_ENABLED: parseBoolean({
+        envKey: 'TRUEFOUNDRY_SANDBOX_ENABLED',
+        raw: getEnv('TRUEFOUNDRY_SANDBOX_ENABLED'),
+        defaultValue: false,
+      }),
+      TRUEFOUNDRY_SANDBOX_PROVIDER: parseTrueFoundrySandboxProvider(
+        getEnv('TRUEFOUNDRY_SANDBOX_PROVIDER', { required: false }),
+      ),
+      TRUEFOUNDRY_SANDBOX_API_KEY: getEnv('TRUEFOUNDRY_SANDBOX_API_KEY', { required: false }),
+      TRUEFOUNDRY_SANDBOX_SERVER_URL: getEnv('TRUEFOUNDRY_SANDBOX_SERVER_URL', { required: false }),
+      TRUEFOUNDRY_SANDBOX_SETTINGS: getEnv('TRUEFOUNDRY_SANDBOX_SETTINGS', { required: false }),
+      TRUEFOUNDRY_TENANT_ID_TO_ALLOWED_MODEL_PROVIDER_ACCOUNTS: parseTenantIdToAllowedModelProviderAccounts(
+        getEnv('TRUEFOUNDRY_TENANT_ID_TO_ALLOWED_MODEL_PROVIDER_ACCOUNTS', { required: false }),
+      ),
+      TRUEFOUNDRY_WEB_SEARCH_PROVIDER: parseTrueFoundryWebSearchProvider(
+        getEnv('TRUEFOUNDRY_WEB_SEARCH_PROVIDER', { required: false }),
+      ),
     };
 
 export function isOidcConfigured(
@@ -725,42 +1004,101 @@ export function isOidcConfigured(
 }
 
 /**
- * TrueFoundry mode: trueforge is backed by the ServiceFoundry server (models today, MCP and other
- * resources later) rather than its local catalog. Gated on `TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL`.
+ * TrueFoundry mode: ServiceFoundry-backed models/MCP/agents. Only available on
+ * distributed config when `TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL` is set.
  */
 export function isTrueFoundryModeEnabled(
   config: ServerConfiguration = configuration,
-): config is ServerConfiguration & { TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL: string } {
-  return config.TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL !== undefined;
+): config is DistributedServerConfiguration & { TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL: string } {
+  return !config.STANDALONE && config.TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL !== undefined;
 }
 
 /** Runtime auth/integration mode for this process. */
-export enum TrueForgeMode {
+export enum TrueForgeAuthMode {
   Standalone = 'standalone',
   Oidc = 'oidc',
   TrueFoundry = 'truefoundry',
 }
 
 /**
- * Resolve the active {@link TrueForgeMode} from configuration.
+ * Resolve the active {@link TrueForgeAuthMode} from configuration.
  * TrueFoundry wins over OIDC when both would otherwise be set (startup already rejects that combo).
  */
-export function getTrueForgeMode(config: ServerConfiguration = configuration): TrueForgeMode {
+export function getTrueForgeAuthMode(config: ServerConfiguration = configuration): TrueForgeAuthMode {
   if (isTrueFoundryModeEnabled(config)) {
-    return TrueForgeMode.TrueFoundry;
+    return TrueForgeAuthMode.TrueFoundry;
   }
   if (isOidcConfigured(config)) {
-    return TrueForgeMode.Oidc;
+    return TrueForgeAuthMode.Oidc;
   }
-  return TrueForgeMode.Standalone;
+  return TrueForgeAuthMode.Standalone;
 }
 
-// TrueFoundry mode authenticates each caller with their own gateway token, so browser SSO must be
-// off — the two auth models are mutually exclusive.
-if (isTrueFoundryModeEnabled(configuration) && isOidcConfigured(configuration)) {
-  throw new Error(
-    'TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL (TrueFoundry mode) and OIDC (SSO) cannot both be enabled at once.',
-  );
+if (isTrueFoundryModeEnabled(configuration)) {
+  // TrueFoundry authenticates each caller with their own gateway token, so browser SSO must be off.
+  if (isOidcConfigured(configuration)) {
+    throw new Error(
+      'TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL (TrueFoundry mode) and OIDC (SSO) cannot both be enabled at once.',
+    );
+  }
+  // TRUEFOUNDRY_API_KEY is required when TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL is set.
+  if (configuration.TRUEFOUNDRY_API_KEY === undefined) {
+    throw new Error('TRUEFOUNDRY_API_KEY is required when TRUEFOUNDRY_SERVICEFOUNDRY_SERVER_URL is set.');
+  }
+
+  // Shared sandbox
+  if (configuration.TRUEFOUNDRY_SANDBOX_ENABLED) {
+    if (configuration.TRUEFOUNDRY_SANDBOX_PROVIDER === undefined) {
+      throw new Error(
+        'TRUEFOUNDRY_SANDBOX_ENABLED is true but TRUEFOUNDRY_SANDBOX_PROVIDER is not set. ' +
+          'Set TRUEFOUNDRY_SANDBOX_PROVIDER to "daytona" or "truefoundry", or set TRUEFOUNDRY_SANDBOX_ENABLED=false.',
+      );
+    }
+    if (configuration.TRUEFOUNDRY_SANDBOX_SETTINGS === undefined) {
+      throw new Error(
+        'TRUEFOUNDRY_SANDBOX_ENABLED is true but TRUEFOUNDRY_SANDBOX_SETTINGS is not set. ' +
+          'Provide a JSON settings object, or set TRUEFOUNDRY_SANDBOX_ENABLED=false.',
+      );
+    }
+    try {
+      JSON.parse(configuration.TRUEFOUNDRY_SANDBOX_SETTINGS);
+    } catch (error) {
+      throw new Error('TRUEFOUNDRY_SANDBOX_SETTINGS must be valid JSON', { cause: error });
+    }
+    if (
+      configuration.TRUEFOUNDRY_SANDBOX_PROVIDER === 'daytona' &&
+      configuration.TRUEFOUNDRY_SANDBOX_API_KEY === undefined
+    ) {
+      throw new Error(
+        'TRUEFOUNDRY_SANDBOX_PROVIDER=daytona requires TRUEFOUNDRY_SANDBOX_API_KEY, or set TRUEFOUNDRY_SANDBOX_ENABLED=false.',
+      );
+    }
+    if (
+      configuration.TRUEFOUNDRY_SANDBOX_PROVIDER === 'truefoundry' &&
+      configuration.TRUEFOUNDRY_SANDBOX_SERVER_URL === undefined
+    ) {
+      throw new Error(
+        'TRUEFOUNDRY_SANDBOX_PROVIDER=truefoundry requires TRUEFOUNDRY_SANDBOX_SERVER_URL, or set TRUEFOUNDRY_SANDBOX_ENABLED=false.',
+      );
+    }
+  }
+}
+
+if (!configuration.STANDALONE && configuration.TRUEFORGE_API_KEY.trim() === '') {
+  throw new Error('TRUEFORGE_API_KEY must not be empty when STANDALONE=false.');
+}
+
+/**
+ * Effective public application URL. Empty `PUBLIC_BASE_URL` stays empty
+ * (callers that need a callback origin throw).
+ */
+function effectivePublicBaseUrl(config: ServerConfiguration): string {
+  // Standalone production is one process on $PORT. Ignore a leftover Vite
+  // PUBLIC_BASE_URL (e.g. http://localhost:3000) from the shared .env.
+  if (config.STANDALONE && config.NODE_ENV !== 'development') {
+    return `http://localhost:${String(config.PORT)}`;
+  }
+  return config.PUBLIC_BASE_URL;
 }
 
 /**
@@ -769,13 +1107,21 @@ if (isTrueFoundryModeEnabled(configuration) && isOidcConfigured(configuration)) 
  * (required in development and distributed; throws if empty).
  */
 export function getPublicBaseUrl(config: ServerConfiguration = configuration): string {
-  if (config.STANDALONE && config.NODE_ENV !== 'development') {
-    return `http://localhost:${String(config.PORT)}`;
-  }
-  if (config.PUBLIC_BASE_URL === '') {
+  const publicBaseUrl = effectivePublicBaseUrl(config);
+  if (publicBaseUrl === '') {
     throw new Error('PUBLIC_BASE_URL is required for OIDC callbacks but was empty');
   }
-  return config.PUBLIC_BASE_URL;
+  return publicBaseUrl;
+}
+
+/** `/` or `/custom/proxy/path/` — trailing slash for asset URLs and the boot script. Empty / standalone non-dev → `/`. */
+export function getPublicUiBasePath(config: ServerConfiguration = configuration): string {
+  const publicBaseUrl = effectivePublicBaseUrl(config);
+  if (publicBaseUrl === '') {
+    return '/';
+  }
+  const path = new URL(publicBaseUrl).pathname;
+  return path === '/' ? '/' : `${path}/`;
 }
 
 export default configuration;

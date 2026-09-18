@@ -10,6 +10,7 @@ import {
   CreateScheduleRunRequestSchema,
   CreateScheduleRunResponseSchema,
   DeleteScheduleResponseSchema,
+  ExecuteScheduleRunRequestSchema,
   GetScheduleResponseSchema,
   ListScheduleRunsResponseSchema,
   ListSchedulesResponseSchema,
@@ -43,15 +44,34 @@ export const ListSchedulesQuerySchema = z
       })
       .transform(value => parseCommaSeparatedQuery(value))
       .pipe(z.array(NameSchema).min(1).optional()),
+    created_by_me: z
+      .stringbool()
+      .optional()
+      .describe('When true, only schedules created by the authenticated subject.')
+      .openapi({ type: 'boolean' }),
   })
   .openapi('ListSchedulesQuery');
+
+export const ListScheduleRunsQuerySchema = z
+  .object({
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(PAGE_LIMIT)
+      .optional()
+      .default(PAGE_LIMIT)
+      .describe(`Page size. Defaults to ${String(PAGE_LIMIT)}`),
+    page_token: z.string().optional().describe('Opaque token from a previous response `next_page_token`.'),
+  })
+  .openapi('ListScheduleRunsQuery');
 
 export const listSchedulesRoute = createRoute({
   method: 'get',
   path: '/',
   tags: [OpenApiTag.SCHEDULES],
   summary: 'List schedules',
-  description: 'List schedules for the tenant, newest first. Optionally filter by `agent_names`.',
+  description: 'List schedules for the tenant, newest first.',
   'x-fern-sdk-group-name': ['schedules'],
   'x-fern-sdk-method-name': 'list',
   'x-fern-pagination': TOKEN_PAGINATION,
@@ -80,20 +100,26 @@ export const listScheduleRunsRoute = createRoute({
   tags: [OpenApiTag.SCHEDULES],
   summary: 'List runs of a schedule',
   description:
-    'List runs of a schedule, newest `scheduled_for` first. Only the schedule creator (or an admin) may list its runs.',
+    'List runs of a schedule, newest `scheduled_for` first. Available to its creator or a manager of its agent.',
   'x-fern-sdk-group-name': ['schedules'],
   'x-fern-sdk-method-name': 'list_runs',
+  'x-fern-pagination': TOKEN_PAGINATION,
   request: {
     params: ScheduleIdParamsSchema,
+    query: ListScheduleRunsQuerySchema,
   },
   responses: {
     200: {
       content: { 'application/json': { schema: ListScheduleRunsResponseSchema } },
-      description: 'Runs of the schedule.',
+      description: 'Paginated runs of the schedule.',
+    },
+    400: {
+      content: { 'application/json': { schema: RequestErrorResponseSchema } },
+      description: 'Invalid query parameters or page token.',
     },
     403: {
       content: { 'application/json': { schema: RequestErrorResponseSchema } },
-      description: 'The caller is not the schedule creator.',
+      description: 'The caller cannot read the schedule.',
     },
     404: {
       content: { 'application/json': { schema: RequestErrorResponseSchema } },
@@ -145,6 +171,38 @@ export const createScheduleRunRoute = createRoute({
   },
 });
 
+export const executeScheduleRunRoute = createRoute({
+  method: 'post',
+  path: '/runs/execute',
+  tags: [OpenApiTag.INTERNAL],
+  summary: 'Execute a schedule run',
+  description: 'Execute a persisted schedule run using its saved schedule and agent.',
+  'x-fern-sdk-group-name': ['internal', 'schedules'],
+  'x-fern-sdk-method-name': 'execute_run',
+  'x-excluded': true,
+  request: {
+    body: {
+      content: { 'application/json': { schema: ExecuteScheduleRunRequestSchema } },
+      required: true,
+    },
+  },
+  responses: {
+    204: { description: 'Run executed or already has a turn.' },
+    401: {
+      content: { 'application/json': { schema: RequestErrorResponseSchema } },
+      description: 'Invalid service credential.',
+    },
+    404: {
+      content: { 'application/json': { schema: RequestErrorResponseSchema } },
+      description: 'Run, schedule, or agent not found.',
+    },
+    422: {
+      content: { 'application/json': { schema: RequestErrorResponseSchema } },
+      description: 'The run cannot be executed.',
+    },
+  },
+});
+
 export const createScheduleRoute = createRoute({
   method: 'post',
   path: '/',
@@ -166,7 +224,11 @@ export const createScheduleRoute = createRoute({
     },
     400: {
       content: { 'application/json': { schema: RequestErrorResponseSchema } },
-      description: 'Unknown agent or invalid cron.',
+      description: 'Invalid cron or timezone.',
+    },
+    404: {
+      content: { 'application/json': { schema: RequestErrorResponseSchema } },
+      description: 'Named agent not found.',
     },
     409: {
       content: { 'application/json': { schema: RequestErrorResponseSchema } },

@@ -14,11 +14,11 @@ import {
   SESSION_TIME_PRESETS,
   toDateTimeLocalValue,
 } from '../../utils/sessionTimePresets.js';
-import { auiButtonClass } from '../lib/buttonClasses.js';
 import { cn } from '../lib/cn.js';
 import { auiInputClass } from '../lib/inputClasses.js';
 import { auiSelectMenuClass, auiSelectOptionClass, auiSelectTriggerClass } from '../lib/selectClasses.js';
 import { searchAllAgents } from '../lib/useSearchAgentsList.js';
+import { Button } from '../primitives/Button.js';
 import { PopoverSelect } from '../primitives/PopoverSelect.js';
 
 export type AgentSessionsFiltersProps = {
@@ -136,7 +136,7 @@ export function AgentSessionsFilters({
           <Icon name="chevron-down" className="size-4 shrink-0" />
         </button>
         {menuOpen ? (
-          <div className={auiSelectMenuClass('right-0 flex max-h-none overflow-y-visible p-0')}>
+          <div className={auiSelectMenuClass('absolute top-full right-0 mt-1 flex max-h-none overflow-y-visible p-0')}>
             {customPickerOpen ? (
               <div className="flex w-64 min-w-0 flex-col gap-2 border-r border-border p-3">
                 <div className="text-sm font-medium text-text-primary">Select Time Range</div>
@@ -146,7 +146,7 @@ export function AgentSessionsFilters({
                   <input
                     type="datetime-local"
                     step="1"
-                    className={auiInputClass('h-9')}
+                    className={auiInputClass('h-8')}
                     value={fromValue}
                     onChange={event => setFromValue(event.target.value)}
                   />
@@ -156,7 +156,7 @@ export function AgentSessionsFilters({
                   <input
                     type="datetime-local"
                     step="1"
-                    className={auiInputClass('h-9')}
+                    className={auiInputClass('h-8')}
                     value={toValue}
                     onChange={event => setToValue(event.target.value)}
                   />
@@ -164,9 +164,9 @@ export function AgentSessionsFilters({
                 <p className="text-xs text-text-secondary">
                   Timezone: <span className="font-medium text-text-primary">{formatTimezoneOffsetLabel()}</span>
                 </p>
-                <button type="button" className={auiButtonClass({ className: 'mt-auto' })} onClick={applyCustom}>
+                <Button.Primary type="button" className="mt-auto" onClick={applyCustom}>
                   Apply
-                </button>
+                </Button.Primary>
               </div>
             ) : null}
             <div className="flex max-h-80 w-44 shrink-0 flex-col overflow-y-auto p-1" role="listbox">

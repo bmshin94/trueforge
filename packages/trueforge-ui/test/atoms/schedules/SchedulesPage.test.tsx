@@ -5,7 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SchedulesPage } from '@/atoms/schedules/SchedulesPage.js';
 import { ToasterProvider } from '@/containers/ToasterContainer.js';
 import { ServerProvider } from '@/server/ServerContext.js';
-import type { AgentUIServer, Schedule, ScheduleRun, ScheduleServer } from '@/server/types.js';
+import type {
+  AgentUIServer,
+  ListPermissionsResponse,
+  PermissionsServer,
+  Schedule,
+  ScheduleRun,
+  ScheduleServer,
+} from '@/server/types.js';
 import { createMockAgentUIServer } from '../../server/mockServer.js';
 
 const sampleSchedules: Schedule[] = [
@@ -61,6 +68,7 @@ function renderPage(
   overrides: Partial<ScheduleServer> = {},
   listImpl?: ScheduleServer['listSchedules'],
   searchAgents?: AgentUIServer['searchAgents'],
+  options: { agentId?: string; permissions?: PermissionsServer } = {},
 ) {
   const scheduleServer: ScheduleServer = {
     listSchedules: vi.fn(
@@ -80,33 +88,118 @@ function renderPage(
   const server = createMockAgentUIServer({
     searchAgents: searchAgents ?? vi.fn(async () => [{ name: 'demo-agent', agentId: 'demo-agent' }]),
     schedules: scheduleServer,
+    ...(options.permissions == null ? {} : { permissions: options.permissions }),
   });
   render(
     <ServerProvider server={server}>
       <ToasterProvider>
-        <SchedulesPage />
+        <SchedulesPage {...(options.agentId == null ? {} : { agentId: options.agentId })} />
       </ToasterProvider>
     </ServerProvider>,
   );
-  return { scheduleServer };
+  return { scheduleServer, searchAgents: server.searchAgents };
 }
 
 describe('SchedulesPage', () => {
   it('lists schedules in the table', async () => {
-    const { scheduleServer } = renderPage();
+    const { scheduleServer, searchAgents } = renderPage();
     expect(await screen.findByRole('heading', { name: 'Scheduled Agents' })).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'daily-digest' })).toBeInTheDocument();
+      expect(screen.getByText('daily-digest')).toBeInTheDocument();
     });
     expect(screen.getAllByText('demo-agent').length).toBeGreaterThan(0);
     expect(screen.getByText('—')).toBeInTheDocument();
     expect(screen.getByText('Showing 1')).toBeInTheDocument();
     expect(scheduleServer.listSchedules).toHaveBeenCalledWith(expect.objectContaining({ limit: 10 }));
+    // Agent catalog loads only when the filter opens (infinite scroll), not on mount.
+    expect(searchAgents).not.toHaveBeenCalled();
+  });
+
+  it('disables schedule mutations without MANAGE or DELETE', async () => {
+    const { scheduleServer } = renderPage(sampleSchedules, {}, undefined, undefined, {
+      agentId: 'demo-agent',
+      permissions: {
+        listPermissions: vi.fn(async (): Promise<ListPermissionsResponse> => ({
+          data: { type: 'schedule', permissions: { s1: [] } },
+        })),
+      },
+    });
+
+    expect(await screen.findByRole('button', { name: 'Create Schedule' })).toBeDisabled();
+    expect(await screen.findByRole('button', { name: 'Run now daily-digest' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for daily-digest' }));
+    await waitFor(() => {
+      expect(screen.getByRole('menuitem', { name: 'Edit' })).toBeDisabled();
+      expect(screen.getByRole('menuitem', { name: 'Pause' })).toBeDisabled();
+      expect(screen.getByRole('menuitem', { name: 'Delete' })).toBeDisabled();
+    });
+    expect(scheduleServer.updateSchedule).not.toHaveBeenCalled();
+    expect(scheduleServer.deleteSchedule).not.toHaveBeenCalled();
+  });
+
+  it('allows schedule creation with agent USE permission', async () => {
+    renderPage(sampleSchedules, {}, undefined, undefined, {
+      agentId: 'demo-agent',
+      permissions: {
+        listPermissions: vi.fn(async ({ resourceType }): Promise<ListPermissionsResponse> => ({
+          data:
+            resourceType === 'agent'
+              ? { type: 'agent', permissions: { 'demo-agent': ['USE'] } }
+              : { type: resourceType, permissions: { s1: [] } },
+        })),
+      },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Create Schedule' })).toBeEnabled();
+    });
+    expect(screen.getByRole('button', { name: 'Run now daily-digest' })).toBeDisabled();
+  });
+
+  it('leaves Create enabled for All agents and gates USE when a specific agent is selected', async () => {
+    const listPermissions = vi.fn(async ({ resourceType }): Promise<ListPermissionsResponse> => ({
+      data:
+        resourceType === 'agent'
+          ? { type: 'agent', permissions: { 'demo-agent': [] } }
+          : { type: resourceType, permissions: {} },
+    }));
+    renderPage(sampleSchedules, {}, undefined, undefined, {
+      permissions: { listPermissions },
+    });
+
+    expect(await screen.findByRole('button', { name: 'Create Schedule' })).toBeEnabled();
+    expect(listPermissions).not.toHaveBeenCalledWith(
+      expect.objectContaining({ resourceType: 'agent', resourceIds: expect.arrayContaining(['demo-agent']) }),
+    );
+
+    const filter = screen.getByRole('combobox', { name: 'Filter by agent' });
+    fireEvent.focus(filter);
+    fireEvent.click(await screen.findByRole('option', { name: 'demo-agent' }));
+
+    await waitFor(() => {
+      expect(listPermissions).toHaveBeenCalledWith({
+        resourceType: 'agent',
+        resourceIds: ['demo-agent'],
+      });
+      expect(screen.getByRole('button', { name: 'Create Schedule' })).toBeDisabled();
+    });
+  });
+  it('locks embedded schedules to the supplied agent', async () => {
+    const { scheduleServer } = renderPage(sampleSchedules, {}, undefined, undefined, { agentId: 'demo-agent' });
+
+    await waitFor(() => {
+      expect(scheduleServer.listSchedules).toHaveBeenCalledWith(
+        expect.objectContaining({ agentIds: ['demo-agent'], limit: 10 }),
+      );
+    });
+    expect(screen.queryByRole('heading', { name: 'Scheduled Agents' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: 'Filter by agent' })).not.toBeInTheDocument();
   });
 
   it('shows empty state when there are no schedules', async () => {
     renderPage([]);
-    expect(await screen.findByText('No schedules yet. Create one to get started.')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'No Schedules Found' })).toBeInTheDocument();
+    expect(screen.getByText('Create one to get started.')).toBeInTheDocument();
   });
 
   it('requests the next page token when Next is clicked', async () => {
@@ -124,13 +217,13 @@ describe('SchedulesPage', () => {
       });
     renderPage(sampleSchedules, {}, listSchedules);
 
-    expect(await screen.findByRole('button', { name: 'daily-digest' })).toBeInTheDocument();
+    expect(await screen.findByText('daily-digest')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
 
     await waitFor(() => {
       expect(listSchedules).toHaveBeenLastCalledWith(expect.objectContaining({ pageToken: 'page-2', limit: 10 }));
     });
-    expect(await screen.findByRole('button', { name: 'weekly-digest' })).toBeInTheDocument();
+    expect(await screen.findByText('weekly-digest')).toBeInTheDocument();
   });
 
   it('ignores run history returned for a stale schedules page', async () => {
@@ -149,9 +242,9 @@ describe('SchedulesPage', () => {
     });
     renderPage(sampleSchedules, { listScheduleRuns }, listSchedules);
 
-    await screen.findByRole('button', { name: 'daily-digest' });
+    await screen.findByText('daily-digest');
     fireEvent.click(screen.getByRole('button', { name: 'Next page' }));
-    expect(await screen.findByRole('button', { name: 'weekly-digest' })).toBeInTheDocument();
+    expect(await screen.findByText('weekly-digest')).toBeInTheDocument();
 
     await act(async () => {
       resolveFirstRuns([
@@ -171,10 +264,10 @@ describe('SchedulesPage', () => {
 
   it('filters by agent via agentIds', async () => {
     const { scheduleServer } = renderPage();
-    await screen.findByRole('button', { name: 'daily-digest' });
+    await screen.findByText('daily-digest');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Filter by agent' }));
-    fireEvent.click(screen.getByRole('option', { name: 'demo-agent' }));
+    fireEvent.focus(screen.getByRole('combobox', { name: 'Filter by agent' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'demo-agent' }));
 
     await waitFor(() => {
       expect(scheduleServer.listSchedules).toHaveBeenCalledWith(
@@ -343,28 +436,51 @@ describe('SchedulesPage', () => {
       nextPageToken: 'page-2',
     }));
 
-    await screen.findByRole('button', { name: 'daily-digest' });
+    await screen.findByText('daily-digest');
     fireEvent.change(screen.getByPlaceholderText('Search schedules by name'), {
       target: { value: 'nope' },
     });
 
-    expect(await screen.findByText('No schedules match your filters.')).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'No Schedules Found' })).toBeInTheDocument();
+    expect(screen.getByText('No schedules match your filters.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Next page' })).toBeEnabled();
   });
 
-  it('loads every page of agents for the filter', async () => {
-    const agents = Array.from({ length: 51 }, (_, index) => ({
-      agentId: `agent-${String(index + 1)}`,
-      name: `Agent ${String(index + 1)}`,
-    }));
-    const searchAgents = vi.fn(async ({ limit = 50, offset = 0 } = {}) => agents.slice(offset, offset + limit));
+  it('searches agents in the filter', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const agents = [
+      { agentId: 'alpha-agent', name: 'alpha-agent' },
+      { agentId: 'beta-agent', name: 'beta-agent' },
+    ];
+    const searchAgents = vi.fn(
+      async ({ query, limit = 50, offset = 0 }: { query?: string; limit?: number; offset?: number } = {}) => {
+        const matched =
+          query == null || query === ''
+            ? agents
+            : agents.filter(agent => agent.name.toLowerCase().includes(query.toLowerCase()));
+        return matched.slice(offset, offset + limit);
+      },
+    );
     renderPage(sampleSchedules, {}, undefined, searchAgents);
+    await screen.findByText('daily-digest');
+
+    const filter = screen.getByRole('combobox', { name: 'Filter by agent' });
+    fireEvent.focus(filter);
+    expect(await screen.findByRole('option', { name: 'All agents' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'alpha-agent' })).toBeInTheDocument();
+
+    fireEvent.change(filter, { target: { value: 'beta' } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300);
+    });
 
     await waitFor(() => {
-      expect(searchAgents).toHaveBeenCalledTimes(2);
+      expect(searchAgents).toHaveBeenCalledWith(expect.objectContaining({ query: 'beta' }));
+      expect(screen.getByRole('option', { name: 'beta-agent' })).toBeInTheDocument();
+      expect(screen.queryByRole('option', { name: 'All agents' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('option', { name: 'alpha-agent' })).not.toBeInTheDocument();
     });
-    fireEvent.click(await screen.findByRole('button', { name: 'Filter by agent' }));
-    expect(screen.getByRole('option', { name: 'Agent 51' })).toBeInTheDocument();
+    vi.useRealTimers();
   });
 
   it('opens the create drawer from isNew=true then clears the flag', async () => {
@@ -376,5 +492,56 @@ describe('SchedulesPage', () => {
       expect(new URL(window.location.href).searchParams.get('isNew')).toBeNull();
     });
     expect(new URL(window.location.href).searchParams.get('agent')).toBe('demo-agent');
+  });
+
+  it('shows Created by when schedules include createdBySubject', async () => {
+    const dailyDigest = sampleSchedules[0];
+    if (dailyDigest === undefined) throw new Error('expected sample schedule');
+    renderPage([
+      {
+        ...dailyDigest,
+        createdBySubject: {
+          subjectId: 'u1',
+          subjectType: 'user',
+          subjectDisplayName: 'bob@example.com',
+        },
+      },
+    ]);
+    expect(await screen.findByRole('columnheader', { name: 'Created by' })).toBeInTheDocument();
+    expect(screen.getByText('bob@example.com')).toBeInTheDocument();
+    expect(document.querySelector('[data-slot="avatar-fallback"]')).toHaveTextContent(/^B$/);
+  });
+
+  it('keeps Created by when filters hide the row that has createdBySubject', async () => {
+    const dailyDigest = sampleSchedules[0];
+    if (dailyDigest === undefined) throw new Error('expected sample schedule');
+    renderPage([
+      dailyDigest,
+      {
+        ...dailyDigest,
+        id: 's2',
+        name: 'weekly-digest',
+        createdBySubject: {
+          subjectId: 'u1',
+          subjectType: 'user',
+          subjectDisplayName: 'bob@example.com',
+        },
+      },
+    ]);
+    expect(await screen.findByRole('columnheader', { name: 'Created by' })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText('Search schedules by name'), {
+      target: { value: 'daily' },
+    });
+    expect(screen.getByText('daily-digest')).toBeInTheDocument();
+    expect(screen.queryByText('weekly-digest')).not.toBeInTheDocument();
+    expect(screen.queryByText('bob@example.com')).not.toBeInTheDocument();
+    expect(screen.getByRole('columnheader', { name: 'Created by' })).toBeInTheDocument();
+  });
+
+  it('hides Created by when no schedule has createdBySubject', async () => {
+    renderPage();
+    await screen.findByText('daily-digest');
+    expect(screen.queryByRole('columnheader', { name: 'Created by' })).not.toBeInTheDocument();
   });
 });

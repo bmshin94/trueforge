@@ -8,11 +8,14 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 
 import type { AgentConfigEditor } from '../atoms/draft/AgentConfigEditors.js';
+import { useAgentConfigInstructions } from '../atoms/draft/AgentConfigInstructionsContext.js';
+import type { AgentInstructionsDraft } from '../atoms/draft/AgentInstructionsDrawer.js';
 import { useDraftCatalog } from '../atoms/draft/DraftCatalogProvider.js';
-import { useDebouncedAgentInstructions } from '../hooks/useDebouncedAgentInstructions.js';
+import { withInitialUserMessages } from '../atoms/draft/agentConfigMessages.js';
+import { useResourcePermissions } from '../hooks/useResourcePermissions.js';
 import { useOptionalServer, useServerCapabilities } from '../server/ServerContext.js';
-import { useShellMode } from '../server/ShellModeContext.js';
-import type { AgentSpec, McpToolSelection } from '../server/types.js';
+import { shellIsCreateAgent, useShellMode } from '../server/ShellModeContext.js';
+import type { AgentSpec, ConnectorState, McpToolSelection } from '../server/types.js';
 import { useSlot } from '../theme/SlotsProvider.js';
 
 export function AgentConfigDrawerContainer({ showClose = false }: { showClose?: boolean }) {
@@ -20,25 +23,20 @@ export function AgentConfigDrawerContainer({ showClose = false }: { showClose?: 
   const updateAgentSpec = useTrueFoundryUpdateAgentSpec();
   const flushAgentSpec = useTrueFoundryFlushAgentSpec();
   const shell = useShellMode();
+  const agentId = shell.mode.status === 'active' ? shell.mode.agentId : undefined;
+  const { allows } = useResourcePermissions({
+    resourceType: 'agent',
+    resourceIds: agentId == null ? [] : [agentId],
+  });
+  const canManageAgent = allows(agentId, 'MANAGE');
   const server = useOptionalServer();
   const capabilities = useServerCapabilities();
   const catalog = useDraftCatalog();
   const AgentConfigPanel = useSlot('AgentConfigPanel');
   const AgentConfigEditors = useSlot('AgentConfigEditors');
-  const SaveAgentButton = useSlot('SaveAgentButton');
   const [editor, setEditor] = useState<AgentConfigEditor | null>(null);
-  const commitInstructions = useCallback(
-    (instructions: string) => updateAgentSpec?.({ instructions }),
-    [updateAgentSpec],
-  );
-  const {
-    draft: instructionDraft,
-    onChange: onInstructionChange,
-    flush: flushInstructions,
-  } = useDebouncedAgentInstructions({
-    value: agentSpec?.instructions ?? '',
-    onCommit: commitInstructions,
-  });
+  const isBuilder = shellIsCreateAgent(shell.mode);
+  const { draft: instructionDraft, flush: flushInstructions } = useAgentConfigInstructions();
   const closeDrawer = useCallback(() => {
     flushInstructions();
     void flushAgentSpec();
@@ -46,19 +44,28 @@ export function AgentConfigDrawerContainer({ showClose = false }: { showClose?: 
   }, [flushAgentSpec, flushInstructions, shell]);
 
   useEffect(() => {
-    if (shell.agentConfigOpen) catalog.ensureLoaded();
-  }, [catalog, shell.agentConfigOpen]);
+    if (isBuilder) catalog.ensureLoaded();
+  }, [catalog, isBuilder]);
 
   useEffect(() => {
-    if (!shell.agentConfigOpen) return;
+    if (!canManageAgent) setEditor(null);
+  }, [canManageAgent]);
+
+  useEffect(() => {
+    if (!showClose || !shell.agentConfigOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && editor === null && document.querySelector('dialog[open]') === null) {
+      if (
+        !event.defaultPrevented &&
+        event.key === 'Escape' &&
+        editor === null &&
+        document.querySelector('dialog[open]') === null
+      ) {
         closeDrawer();
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [closeDrawer, editor, shell.agentConfigOpen]);
+  }, [closeDrawer, editor, shell.agentConfigOpen, showClose]);
 
   // Flush pending edits on unmount. ChatProvider remount (runtimeKey) tears the
   // runtime down first — flush then throws; ignore so the new draft can mount.
@@ -74,12 +81,13 @@ export function AgentConfigDrawerContainer({ showClose = false }: { showClose?: 
     [flushAgentSpec, flushInstructions],
   );
 
-  const updateSpec = useCallback(
-    (next: AgentSpec) => {
+  const commitSpec = useCallback(
+    ({ next, instructions }: { next: AgentSpec; instructions: string }) => {
+      if (!canManageAgent) return;
       if (next.skills && next.skills.length > 0 && capabilities?.sandbox.enabled === true) {
         updateAgentSpec?.({
           ...next,
-          instructions: instructionDraft,
+          instructions: instructions || undefined,
           config: {
             ...next.config,
             sandbox: { ...next.config?.sandbox, enabled: true },
@@ -87,9 +95,27 @@ export function AgentConfigDrawerContainer({ showClose = false }: { showClose?: 
         });
         return;
       }
-      updateAgentSpec?.({ ...next, instructions: instructionDraft });
+      updateAgentSpec?.({ ...next, instructions: instructions || undefined });
     },
-    [capabilities?.sandbox.enabled, instructionDraft, updateAgentSpec],
+    [canManageAgent, capabilities?.sandbox.enabled, updateAgentSpec],
+  );
+
+  const updateSpec = useCallback(
+    (next: AgentSpec) => {
+      commitSpec({ next, instructions: instructionDraft });
+    },
+    [commitSpec, instructionDraft],
+  );
+
+  const saveInstructions = useCallback(
+    (draft: AgentInstructionsDraft) => {
+      if (agentSpec === null) return;
+      commitSpec({
+        next: withInitialUserMessages({ spec: agentSpec, messages: draft.messages }),
+        instructions: draft.instructions,
+      });
+    },
+    [agentSpec, commitSpec],
   );
 
   const loadMcpTools = useCallback(
@@ -99,8 +125,14 @@ export function AgentConfigDrawerContainer({ showClose = false }: { showClose?: 
     },
     [server],
   );
+  const loadMcpConnector = useCallback(
+    async (connectorId: string): Promise<ConnectorState | undefined> => {
+      return server?.getMcpConnector?.({ connectorId });
+    },
+    [server],
+  );
 
-  if (!shell.agentConfigOpen || agentSpec === null || shell.mode.status !== 'active' || !shell.mode.isMutable) {
+  if (!isBuilder || agentSpec === null || (showClose && !shell.agentConfigOpen)) {
     return null;
   }
 
@@ -111,13 +143,17 @@ export function AgentConfigDrawerContainer({ showClose = false }: { showClose?: 
       <AgentConfigPanel
         spec={agentSpec}
         model={model}
-        saveAction={<SaveAgentButton instructionsOverride={instructionDraft} />}
+        models={catalog.models}
+        modelsLoading={catalog.loading}
+        modelsError={catalog.error}
+        skills={catalog.skills}
         skillsAvailable={capabilities?.skill.enabled === true}
         instructions={instructionDraft}
-        onInstructionsChange={onInstructionChange}
-        onInstructionsBlur={flushInstructions}
-        onOpenEditor={setEditor}
+        onOpenEditor={nextEditor => {
+          if (canManageAgent) setEditor(nextEditor);
+        }}
         onChange={updateSpec}
+        disabled={!canManageAgent}
         onClose={showClose ? closeDrawer : undefined}
       />
       <AgentConfigEditors
@@ -130,6 +166,9 @@ export function AgentConfigDrawerContainer({ showClose = false }: { showClose?: 
         error={catalog.error}
         skillsDisabled={capabilities?.skill.enabled !== true}
         sandboxAvailable={capabilities?.sandbox.enabled === true}
+        instructions={instructionDraft}
+        onInstructionsSave={saveInstructions}
+        {...(server?.getMcpConnector === undefined ? {} : { loadMcpConnector })}
         loadMcpTools={loadMcpTools}
         onRefreshConnectors={catalog.refreshConnectors}
         onChange={updateSpec}

@@ -8,7 +8,6 @@ import { useOptionalCatalogServer, useScheduleServer } from '../../server/Server
 import type { ConnectorState, Schedule, ScheduleRun } from '../../server/types.js';
 import { useDraftCatalog } from '../draft/DraftCatalogProvider.js';
 import { ConnectorConnectButton } from '../draft/DraftCompositeSelector.js';
-import { auiButtonClass } from '../lib/buttonClasses.js';
 import { cn } from '../lib/cn.js';
 import { Button } from '../primitives/Button.js';
 import { formatCadenceSummary, formatRelativeTime } from './cadence.js';
@@ -86,23 +85,23 @@ export function TestScheduleScreen({ schedule, agentName, mcpMounts, onEditConfi
       <section className="overflow-hidden rounded-lg border border-border bg-card-bg">
         <DetailRow label="Agent">{agentName}</DetailRow>
         <DetailRow label="Name">{schedule.name}</DetailRow>
+        <DetailRow label="Status">
+          <ScheduleStatusBadge status={schedule.status} />
+        </DetailRow>
         <DetailRow label="Task">
           <span className="whitespace-pre-wrap break-words">{schedule.task}</span>
         </DetailRow>
-        <DetailRow label="Cadence">
+        <DetailRow label="Frequency">
           <div className="flex flex-wrap items-center justify-end gap-1.5">
             <span>{cadence}</span>
             <code className="text-text-secondary font-mono text-xs">{schedule.cron}</code>
           </div>
         </DetailRow>
-        <DetailRow label="Status">
-          <ScheduleStatusBadge status={schedule.status} />
-        </DetailRow>
         <div className="flex justify-end px-3 py-2.5">
-          <Button type="button" variant="outline" size="sm" onClick={onEditConfiguration}>
+          <Button.Secondary type="button" size="small" onClick={onEditConfiguration}>
             <Icon name="pencil" className="size-3.5" />
             Edit Configuration
-          </Button>
+          </Button.Secondary>
         </div>
       </section>
 
@@ -151,15 +150,10 @@ export function TestScheduleScreen({ schedule, agentName, mcpMounts, onEditConfi
       <section className="overflow-hidden rounded-lg border border-border bg-card-bg">
         <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
           <h3 className="text-text-secondary text-[10px] font-semibold tracking-wide uppercase">Test Run</h3>
-          <button
-            type="button"
-            disabled={running}
-            onClick={() => void handleRunTest()}
-            className={auiButtonClass({ variant: 'default', size: 'sm' })}
-          >
+          <Button.Primary type="button" disabled={running} size="small" onClick={() => void handleRunTest()}>
             <Icon name={running ? 'loader' : 'play'} className={cn('size-3.5', running && 'animate-spin')} />
             Run Test
-          </button>
+          </Button.Primary>
         </div>
         {lastTestRun == null ? (
           <p className="text-text-secondary px-3 py-3 text-sm">

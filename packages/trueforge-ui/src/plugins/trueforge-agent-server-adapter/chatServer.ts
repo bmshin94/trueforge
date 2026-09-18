@@ -5,7 +5,7 @@
  * `nextPageToken`), and `null` normalized to absent. Harness keys MCP mounts by
  * name and returns `null` for optional fields — the maps below bridge both.
  *
- * Skills are name refs on the wire (`Skill`).
+ * Skills are name (+ optional preload) refs on the wire (`Skill`).
  *
  * Session create takes `{ name }` or `{ spec }`; reads carry the
  * `reference`/`inline` discriminator, with reference rows already naming their
@@ -44,7 +44,12 @@ function toUiMcpServer(server: TrueForgeApi.McpServer): HarnessMcpServerMount {
 }
 
 function toUiSkill(skill: TrueForgeApi.Skill): HarnessSkillMount {
-  return { name: skill.name };
+  return { name: skill.name, preload: skill.preload === true };
+}
+
+function toHarnessSkill(skill: HarnessSkillMount): TrueForgeApi.Skill {
+  // Picker `id` is AvailableSkill.name (attach key); `name` is display — see builder getSkills.
+  return { name: skill.id ?? skill.name, preload: skill.preload === true };
 }
 
 /** Drop UI draft `id` before admission; Harness MCP mounts are name-keyed. */
@@ -65,7 +70,7 @@ export function toHarnessAgentSpec(spec: HarnessAgentSpec): TrueForgeApi.AgentSp
             return server;
           }),
         }),
-    ...(skills === undefined ? {} : { skills: skills.map(({ name }) => ({ name })) }),
+    ...(skills === undefined ? {} : { skills: skills.map(toHarnessSkill) }),
   };
 }
 
@@ -124,9 +129,13 @@ export interface HarnessPageSource<T> {
 
 export function toListResult<TSource, TResult>(
   page: HarnessPageSource<TSource>,
-  map: (item: TSource) => TResult,
+  map: (item: TSource) => TResult | undefined,
 ): ListResult<TResult> {
-  const data = page.data.map(map);
+  const data: TResult[] = [];
+  for (const item of page.data) {
+    const mapped = map(item);
+    if (mapped !== undefined) data.push(mapped);
+  }
   const token = page.response.pagination.nextPageToken;
   return {
     data,
@@ -195,6 +204,7 @@ export function createHarnessChatServer(
         ...(request.order === undefined ? {} : { order: request.order }),
         ...(request.pageToken === undefined ? {} : { pageToken: request.pageToken }),
         ...(request.agentId === undefined || request.agentId.length === 0 ? {} : { agentId: request.agentId }),
+        ...(request.createdByMe === undefined ? {} : { createdByMe: request.createdByMe }),
       });
       return toListResult(page, toUiSession);
     },
@@ -231,10 +241,13 @@ export function createHarnessChatServer(
       });
       let fallbackSequence = 0;
       for await (const item of stream.withMetadata()) {
-        yield {
-          sequenceNumber: sequenceNumber(item.id, fallbackSequence),
-          event: toUiStreamingEvent(item.data),
-        };
+        const event = toUiStreamingEvent(item.data);
+        if (event !== undefined) {
+          yield {
+            sequenceNumber: sequenceNumber(item.id, fallbackSequence),
+            event,
+          };
+        }
         fallbackSequence += 1;
       }
     },
@@ -254,10 +267,13 @@ export function createHarnessChatServer(
       });
       let fallbackSequence = 0;
       for await (const item of stream.withMetadata()) {
-        yield {
-          sequenceNumber: sequenceNumber(item.id, fallbackSequence),
-          event: toUiStreamingEvent(item.data),
-        };
+        const event = toUiStreamingEvent(item.data);
+        if (event !== undefined) {
+          yield {
+            sequenceNumber: sequenceNumber(item.id, fallbackSequence),
+            event,
+          };
+        }
         fallbackSequence += 1;
       }
     },

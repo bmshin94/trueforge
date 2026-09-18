@@ -3,6 +3,7 @@ import type { AgentSpec } from '@truefoundry/trueforge-core/agent-session';
 import { AgentSpecSchema, Sessions } from '@truefoundry/trueforge-core/agent-session';
 import { createLogger } from 'winston';
 import { createTurnsRouter, toContentDisposition } from '../../../src/apis/turns';
+import { TrueForgeAuthorizer } from '../../../src/auth/authorizer';
 import { STANDALONE_REQUEST_CONTEXT } from '../../../src/auth/identity';
 import { McpServerWithAuthStore } from '../../../src/db/McpServerWithAuthStore';
 import { migrateSqliteToLatest } from '../../../src/db/migrateSqlite';
@@ -49,9 +50,10 @@ async function buildApp() {
       resolveSkillStore: () => new SqliteSkillStore(db),
       resolveAgentStore: () => new SqliteAgentStore(db),
       eventSubscriptions: new EventSubscriptionRegistry(undefined),
-      sandboxProviderStore: new SqliteSandboxProviderStore(db),
+      resolveSandboxProviderStore: () => new SqliteSandboxProviderStore(db),
       logger: createLogger({ silent: true }),
       resolveRequestContext: () => STANDALONE_REQUEST_CONTEXT,
+      authorizer: new TrueForgeAuthorizer(),
     }),
   );
 
@@ -75,7 +77,7 @@ describe('GET /{session_id}/turns/{turn_id}/download-sandbox-file', () => {
     const { app } = await buildApp();
 
     for (const path of [
-      'report.pdf',
+      '../etc/passwd',
       '/a/../../etc/passwd',
       '/tmp/nul\0.txt',
       `/tmp/${'a'.repeat(300)}`,
@@ -85,6 +87,14 @@ describe('GET /{session_id}/turns/{turn_id}/download-sandbox-file', () => {
 
       expect(response.status).toBe(400);
     }
+  });
+
+  it('accepts a path relative to the sandbox working directory', async () => {
+    const { app } = await buildApp();
+
+    const response = await app.request(downloadUrl({ sessionId: 'missing', path: 'report.pdf' }));
+
+    expect(response.status).toBe(404);
   });
 
   // PATH_MAX counts the terminating NUL, so 4096 is already too long for the kernel and must be

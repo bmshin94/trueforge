@@ -71,6 +71,7 @@ export const getOrCreateSessionByExternalIdRoute = createRoute({
   description: 'Idempotent get-or-create: returns the existing session for this `external_id`, or creates one',
   'x-fern-sdk-group-name': ['internal', 'sessions'],
   'x-fern-sdk-method-name': 'get_or_create_by_external_id',
+  'x-excluded': true,
   request: {
     body: {
       content: { 'application/json': { schema: GetOrCreateSessionByExternalIdRequestSchema } },
@@ -162,7 +163,7 @@ export const updateSessionRoute = createRoute({
   tags: [OpenApiTag.AGENT_SESSIONS],
   summary: 'Update a session',
   description:
-    'Update a session by replacing `agent` with `{ spec: AgentSpec }`. Named (reference) sessions reject agent updates. An empty body is a valid no-op that refreshes `updated_at`. Only the session creator may update it.',
+    'Update a session: optional `title`, `metadata`, and (inline sessions only) `agent` as `{ spec: AgentSpec }`. Named sessions reject agent updates. An empty body is a valid no-op that refreshes `updated_at`. Only the session creator may update it.',
   'x-fern-sdk-group-name': ['sessions'],
   'x-fern-sdk-method-name': 'update',
   request: {
@@ -202,8 +203,7 @@ export const listSessionsRoute = createRoute({
   path: '/',
   tags: [OpenApiTag.AGENT_SESSIONS],
   summary: 'List sessions',
-  description:
-    "List the caller's sessions (newest first by default), token-paginated. Results are scoped to the authenticated identity via the session store's `created_by_subject.subject_id` filter (not a client query param). Optional `agent_id` filters to sessions bound to that named agent. Pass `page_token` to fetch the next page, keeping the other query params constant.",
+  description: 'List the sessions (newest first by default).',
   'x-fern-sdk-group-name': ['sessions'],
   'x-fern-sdk-method-name': 'list',
   'x-fern-pagination': TOKEN_PAGINATION,

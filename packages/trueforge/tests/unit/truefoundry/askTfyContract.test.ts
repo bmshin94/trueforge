@@ -63,7 +63,7 @@ describe('Ask TFY wire contract', () => {
 
     expect(parsed.config.sandbox.enabled).toBe(true);
     expect(parsed.mcp_servers?.map(server => server.name)).toEqual([...MCP_NAMES]);
-    expect(parsed.skills).toEqual([{ name: SKILL_NAME }]);
+    expect(parsed.skills).toEqual([{ name: SKILL_NAME, preload: false }]);
   });
 
   it('resolves every name in the spec from the headers, so none falls through to the registry', () => {
@@ -79,8 +79,12 @@ describe('Ask TFY wire contract', () => {
   });
 
   it('restores the characters a header cannot carry raw', () => {
-    expect(parseInlineSkills(skillsHeader)[SKILL_NAME].description).toBe(SKILL_DESCRIPTION);
-    expect(parseInlineMcpServers(mcpHeader)['tfy-docs-mcp'].description).toContain('—');
+    const skill = parseInlineSkills(skillsHeader)[SKILL_NAME];
+    const docsMcp = parseInlineMcpServers(mcpHeader)['tfy-docs-mcp'];
+    expect(skill).toBeDefined();
+    expect(docsMcp).toBeDefined();
+    expect(skill?.description).toBe(SKILL_DESCRIPTION);
+    expect(docsMcp?.description).toContain('—');
   });
 
   /** Node rejects a header value outside latin-1 outright, so this is a hard requirement. */

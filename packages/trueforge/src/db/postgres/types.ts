@@ -8,6 +8,7 @@ import type {
   PersistedTurnEvent,
   SessionMetadata,
   SessionMetrics,
+  SessionSource,
   TurnInputItem,
   TurnState,
 } from '@truefoundry/trueforge-core/agent-session';
@@ -24,7 +25,11 @@ import type { CurrentContextUsage } from '@truefoundry/trueforge-core/core/runti
 import type { ColumnType, Generated, JSONColumnType } from 'kysely';
 import type { McpServerManifest } from '../../schemas/mcpServer';
 import type { ModelProviderManifest } from '../../schemas/modelProvider';
-import type { SandboxBuildMetadata, SandboxBuildStatus, SandboxProviderManifest } from '../../schemas/sandboxProvider';
+import type {
+  SandboxBuildMetadata,
+  SandboxBuildStatus,
+  StoredSandboxProviderManifest,
+} from '../../schemas/sandboxProvider';
 import type { ScheduleManifest, ScheduleRunStatus, ScheduleStatus } from '../../schemas/schedule';
 import type { SkillManifest } from '../../schemas/skill';
 import type { OAuthClient, OAuthPendingAuthorizationData, OAuthServer, OAuthToken } from '../mcpServerStore';
@@ -56,6 +61,10 @@ export interface SessionTable {
   session_id: string;
   /** Caller identity that created the session (immutable after create). */
   created_by_subject: JSONColumnType<CreatedBySubject, CreatedBySubject, CreatedBySubject>;
+  /**
+   * Null for interactive sessions.
+   */
+  source: JSONColumnType<SessionSource, SessionSource | null, SessionSource | null> | null;
   /**
    * Named registry binding; XOR with `agent_spec`
    * (CHECK session_agent_xor_check).
@@ -352,8 +361,8 @@ export interface SkillTable {
 export interface SandboxProviderTable {
   /** key */
   tenant_id: string;
-  /** SandboxProviderManifest document; replaced whole on every upsert */
-  manifest: JSONColumnType<SandboxProviderManifest, SandboxProviderManifest, SandboxProviderManifest>;
+  /** StoredSandboxProviderManifest document; replaced whole on every upsert */
+  manifest: JSONColumnType<StoredSandboxProviderManifest, StoredSandboxProviderManifest, StoredSandboxProviderManifest>;
   /** Last persisted build status of the release sandbox image. */
   status: SandboxBuildStatus;
   /** Human-readable detail for `status`; null when ready. */
@@ -374,6 +383,7 @@ export interface AgentTable {
   tenant_id: string;
   /** immutable natural uniqueness target within a tenant */
   name: string;
+  description: string;
   /** AgentSpec document; replaced whole on every upsert */
   manifest: JSONColumnType<AgentSpec, AgentSpec, AgentSpec>;
   external_id: string | null;
@@ -425,6 +435,7 @@ export interface ScheduleRunTable {
   status: ScheduleRunStatus;
   created_by_subject: JSONColumnType<CreatedBySubject, CreatedBySubject, CreatedBySubject>;
   triggered_at: Date | null;
+  reason: string | null;
   created_at: Date;
   updated_at: Date;
 }

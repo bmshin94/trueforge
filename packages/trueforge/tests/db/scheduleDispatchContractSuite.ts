@@ -71,6 +71,7 @@ export function runScheduleDispatchContractSuite<TTransaction>(deps: {
       tenant_id: TENANT,
       created_by_subject: USER_SUBJECT,
       name: `agent-${String(Date.now())}-${String(seq)}`,
+      description: 'Test agent.',
       manifest: AgentSpecSchema.parse({
         model: { name: 'anthropic/claude-sonnet-4-6' },
         instructions: 'Be helpful.',
@@ -231,6 +232,7 @@ export function runScheduleDispatchContractSuite<TTransaction>(deps: {
       expect.objectContaining({
         id: run.id,
         status: 'failed',
+        reason: 'executor unavailable',
       }),
     );
 
@@ -389,10 +391,10 @@ export function runScheduleDispatchContractSuite<TTransaction>(deps: {
     expect(handedOff).toEqual([thrower.run.id, healthy.run.id]);
 
     expect(await store.getRun({ tenant_id: TENANT, id: thrower.run.id })).toEqual(
-      expect.objectContaining({ status: 'failed', triggered_at: null }),
+      expect.objectContaining({ status: 'failed', triggered_at: null, reason: 'executor unavailable' }),
     );
     const healthyUpdated = await store.getRun({ tenant_id: TENANT, id: healthy.run.id });
-    expect(healthyUpdated).toEqual(expect.objectContaining({ status: 'triggered' }));
+    expect(healthyUpdated).toEqual(expect.objectContaining({ status: 'triggered', reason: null }));
     expect(typeof healthyUpdated?.triggered_at).toBe('string');
 
     // Every schedule advances, whatever its run's outcome, and never onto a past time.

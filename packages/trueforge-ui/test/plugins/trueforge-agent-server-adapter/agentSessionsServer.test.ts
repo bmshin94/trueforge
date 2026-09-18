@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { describe, it, vi } from 'vitest';
 
 import { createHarnessAgentSessionsServer } from '@/plugins/trueforge-agent-server-adapter/agentSessionsServer.js';
+import { resolveTrueForgeBaseUrl } from '@/plugins/trueforge-agent-server-adapter/client.js';
 
 describe('createHarnessAgentSessionsServer', () => {
   it('maps agent details and code snippets to the UI contract', async () => {
@@ -10,6 +11,7 @@ describe('createHarnessAgentSessionsServer', () => {
       data: {
         id: 'agent-1',
         name: 'writer',
+        description: 'Writes docs.',
         manifest: { model: { name: 'openai/gpt-5' }, instructions: 'Write.' },
       },
     }));
@@ -36,7 +38,11 @@ describe('createHarnessAgentSessionsServer', () => {
     assert.deepEqual(await server.getAgent({ agentId: 'agent-1' }), {
       agentId: 'agent-1',
       name: 'writer',
-      agentSpec: { model: { name: 'openai/gpt-5' }, instructions: 'Write.' },
+      description: 'Writes docs.',
+      agentSpec: {
+        model: { name: 'openai/gpt-5' },
+        instructions: 'Write.',
+      },
     });
     assert.deepEqual(await server.getCodeSnippets({ agentId: 'agent-1' }), [
       {
@@ -47,7 +53,10 @@ describe('createHarnessAgentSessionsServer', () => {
       },
     ]);
     assert.deepEqual(get.mock.calls[0], ['agent-1']);
-    assert.deepEqual(getCodeSnippets.mock.calls[0], ['agent-1']);
+    assert.deepEqual(getCodeSnippets.mock.calls[0], [
+      'agent-1',
+      { baseUrl: resolveTrueForgeBaseUrl('/').replace(/\/$/, '') },
+    ]);
   });
 
   it('maps listSessions and listSessionEvents onto the UI contract', async () => {
@@ -68,6 +77,11 @@ describe('createHarnessAgentSessionsServer', () => {
             totalTurns: 3,
             totalCostInUsd: 0.25,
             totalDurationMs: 29_711,
+          },
+          source: {
+            type: 'schedule',
+            id: 'schedule-1',
+            runId: 'run-1',
           },
         },
       ],
@@ -101,6 +115,7 @@ describe('createHarnessAgentSessionsServer', () => {
           isMutable: false,
           metrics: { totalTurns: 3, totalCostInUsd: 0.25, totalDurationMs: 29_711 },
           agentName: 'writer',
+          sourceType: 'schedule',
         },
       ],
       nextPageToken: 'next-1',
@@ -112,5 +127,31 @@ describe('createHarnessAgentSessionsServer', () => {
       () => server.listSessions({ startTimestamp: 'not-a-timestamp' }),
       /Invalid ISO timestamp: not-a-timestamp/,
     );
+  });
+
+  it('preserves an unavailable session cost', async () => {
+    const server = createHarnessAgentSessionsServer({
+      client: {
+        sessions: {
+          list: vi.fn(async () => ({
+            data: [
+              {
+                id: 'sess-without-cost',
+                title: 'hello',
+                createdAt: '2026-01-01T00:00:00.000Z',
+                updatedAt: '2026-01-02T00:00:00.000Z',
+                agent: { type: 'inline', spec: { model: { name: 'openai/gpt-5' } } },
+                createdBy: 'user-1',
+                metrics: { totalTurns: 2, totalDurationMs: 96_201 },
+              },
+            ],
+            response: { pagination: {} },
+          })),
+        },
+      } as unknown as TrueForge,
+    });
+
+    const result = await server.listSessions();
+    assert.deepEqual(result.data[0]?.metrics, { totalTurns: 2, totalDurationMs: 96_201 });
   });
 });

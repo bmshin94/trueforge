@@ -4,13 +4,13 @@
  * Runs the periodic control loops (schedule dispatch, …) as a dedicated,
  * single-replica process for distributed mode (`STANDALONE=false`). The controller
  * must run in exactly ONE process per database (see `controller/Controller.ts`);
- * in standalone mode the server process already owns it, so this entry refuses to
- * start there.
+ * in standalone mode the server process already owns it (HTTP loopback to itself), so this
+ * entry refuses to start there.
  *
  * Migrations are owned by the server (`main.ts`). This process only connects to the
  * already-migrated database; the loops have per-pass error boundaries, so they retry
- * each tick until the schema is present. The loops call the server over HTTP at
- * `SERVER_URL`, so no Redis peering is wired here.
+ * each tick until the schema is present. The loops call the server over HTTP(S) at
+ * `SERVER_URL` (mutual TLS when `TRUEFORGE_MTLS_ENABLED`), so no Redis peering is wired here.
  */
 import configuration from './config';
 import { runController } from './controller';
@@ -34,22 +34,24 @@ try {
     process.exit(0);
   }
 
+  logger.info('Connecting to Postgres');
   const db = createDb({
     connectionString: configuration.DATABASE_URL,
     poolMax: configuration.DATABASE_POOL_MAX,
     statementTimeoutMs: configuration.POSTGRES_STATEMENT_TIMEOUT_MS,
     idleInTransactionSessionTimeoutMs: configuration.POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT_MS,
+    ssl: configuration.DATABASE_SSL,
   });
 
   logger.info('Controller starting', {
     serverUrl: configuration.SERVER_URL,
+    mTlsEnabled: configuration.TRUEFORGE_MTLS_ENABLED,
   });
 
   runController({
     scheduleStore: new PostgresScheduleStore(db),
     withTransaction: callback => db.transaction().execute(callback),
     logger,
-    baseUrl: configuration.SERVER_URL,
     gracefulTimeoutSeconds: configuration.GRACEFUL_TIMEOUT_SECONDS,
     onStopped: () => db.destroy(),
   });

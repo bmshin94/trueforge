@@ -1,18 +1,19 @@
-import type { AgentSpec } from '@truefoundry/trueforge-core/agent-session';
+import type { AgentSpec, SessionHandle } from '@truefoundry/trueforge-core/agent-session';
 import {
   Sandbox,
   SkillMounter,
   type AgentDefinition,
   type AgentTracing,
-  type GitSkill,
   type ModelParams,
   type RemoteMcpHeaders,
   type SandboxProvider,
+  type Skill,
   type VercelAIProviderConfig,
 } from '@truefoundry/trueforge-core/core';
 import { HTTPException } from 'hono/http-exception';
 import { join } from 'node:path';
 import type { Logger } from 'winston';
+import { z } from 'zod';
 import configuration from '../config';
 import type { IMcpServerStore, IMcpServerWithAuthStore } from '../db/mcpServerStore';
 import type { IModelProviderStore } from '../db/modelProviderStore';
@@ -20,12 +21,99 @@ import type { ISandboxProviderStore } from '../db/sandboxProviderStore';
 import type { ISkillStore } from '../db/skillStore';
 import { LocalSandboxProvider } from '../sandbox/local/provider/LocalSandboxProvider';
 import { getCachedLocalSandboxSupport, isLocalSandboxFallbackEnabled } from '../sandbox/localRuntime';
-import { toDaytonaSandboxProvider } from '../sandbox/providerUtils';
+import { toSandboxProviderFromRecord } from '../sandbox/providerUtils';
 import type { ReasoningEffort } from '../schemas/modelProvider';
+import { resolveWebSearchProvider } from '../websearch/providers';
 
 export interface McpConnection {
   url: string;
   headers: RemoteMcpHeaders;
+}
+
+/** Gateway header carrying stringified JSON metadata. */
+export const X_TFY_METADATA = 'x-tfy-metadata';
+
+/** Prefix for harness-owned keys */
+export const TFG_METADATA_PREFIX = 'tfg';
+
+const GatewayMetadataSchema = z.record(z.string().min(1), z.string());
+
+/**
+ * Parse inbound `x-tfy-metadata`. Rejects malformed values rather than dropping them.
+ */
+export function parseGatewayMetadataHeader(raw: string): Record<string, string> {
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch (error) {
+    throw new HTTPException(400, { message: `${X_TFY_METADATA} must be a JSON object`, cause: error });
+  }
+  const parsed = GatewayMetadataSchema.safeParse(decoded);
+  if (!parsed.success) {
+    throw new HTTPException(400, {
+      message: `${X_TFY_METADATA} must be a JSON object of string values`,
+    });
+  }
+  return parsed.data;
+}
+
+export function buildGatewayMetadata(input: { session: SessionHandle; turnId: string }): Record<string, string> {
+  // Session.metadata is intentionally omitted for now (Unicode-in-header risk); re-add later.
+  const metadata: Record<string, string> = {
+    [`${TFG_METADATA_PREFIX}.session_id`]: input.session.session_id,
+    [`${TFG_METADATA_PREFIX}.turn_id`]: input.turnId,
+  };
+  const { agent } = input.session;
+  if (agent.type === 'reference') {
+    metadata[`${TFG_METADATA_PREFIX}.agent_id`] = agent.id;
+    if (agent.name !== null) {
+      metadata[`${TFG_METADATA_PREFIX}.agent_name`] = agent.name;
+    }
+  }
+  return metadata;
+}
+
+/** Inbound x-tfy-metadata first; harness tfg.* always win */
+export function mergeGatewayMetadata(input: {
+  session: SessionHandle;
+  turnId: string;
+  tfyMetadata?: Record<string, string> | undefined;
+}): Record<string, string> {
+  return {
+    ...input.tfyMetadata,
+    ...buildGatewayMetadata({ session: input.session, turnId: input.turnId }),
+  };
+}
+
+export function gatewayMetadataHeaders(metadata: Record<string, string>): Record<string, string> {
+  if (Object.keys(metadata).length === 0) {
+    return {};
+  }
+  return { [X_TFY_METADATA]: JSON.stringify(metadata) };
+}
+
+/**
+ * Merge gateway metadata into MCP invoke headers. Preserves authRequired;
+ * metadata is applied after auth/per-server headers.
+ */
+export function withGatewayMetadataHeaders(input: {
+  headers: RemoteMcpHeaders;
+  metadataHeaders: Record<string, string>;
+}): RemoteMcpHeaders {
+  const { headers, metadataHeaders } = input;
+  if (Object.keys(metadataHeaders).length === 0) {
+    return headers;
+  }
+  if (typeof headers !== 'function') {
+    return { ...headers, ...metadataHeaders };
+  }
+  return async () => {
+    const result = await headers();
+    if ('authRequired' in result) {
+      return result;
+    }
+    return { headers: { ...result.headers, ...metadataHeaders } };
+  };
 }
 
 /** Split `provider/model` FQN. Returns undefined when the shape is not exactly one slash. */
@@ -65,7 +153,11 @@ export async function getModelDetails({
       message: `Model name must be a fully qualified "provider/model": ${name}`,
     });
   }
-  const provider = await store.getProvider({ tenant_id, name: parsed.providerName });
+  const provider = await store.getProvider({
+    tenant_id,
+    name: parsed.providerName,
+    model_name: parsed.modelName,
+  });
   if (provider === undefined) {
     throw new HTTPException(422, {
       message: `Unknown model "${name}" — provider not configured`,
@@ -122,48 +214,9 @@ export async function getMcpConnection({
 }
 
 /**
- * Expand agent_spec skill names into git mounts from the skill store.
- * Wire url/path/ref/description on the request are ignored — the store row wins.
- * Throws HTTPException(422) if any name is not registered.
- */
-export async function resolveGitSkills({
-  tenant_id,
-  skills,
-  store,
-}: {
-  tenant_id: string;
-  skills: readonly { name: string }[];
-  store: ISkillStore;
-}): Promise<GitSkill[]> {
-  if (skills.length === 0) {
-    return [];
-  }
-  const names = skills.map(skill => skill.name);
-  const records = await store.listSkills({ tenant_id, names });
-  const byName = new Map(records.map(record => [record.name, record]));
-  const resolved: GitSkill[] = [];
-  for (const skill of skills) {
-    const record = byName.get(skill.name);
-    if (record === undefined) {
-      throw new HTTPException(422, {
-        message: `Unknown skill "${skill.name}" — not configured`,
-      });
-    }
-    resolved.push({
-      name: record.manifest.name,
-      description: record.manifest.description,
-      url: record.manifest.url,
-      path: record.manifest.path ?? '',
-      ref: record.manifest.ref,
-    });
-  }
-  return resolved;
-}
-
-/**
  * Build a runtime SandboxProvider from the configured store row, or the
  * in-memory local fallback when standalone + the cached probe is supported.
- * Builds a fresh Daytona client per call (no network I/O).
+ * Builds a fresh provider client per call (no network I/O).
  */
 /** Single path segment under the sandboxes parent (`_` when sessionId is missing or unsafe). */
 export function localSandboxSessionSegment(sessionId: string | undefined): string {
@@ -186,14 +239,7 @@ export async function resolveSandboxProvider({
 }): Promise<SandboxProvider | undefined> {
   const record = await store.getSandboxProvider(tenant_id);
   if (record !== undefined) {
-    // Clone from the snapshot that was actually built (persisted build_ref), not a name
-    // derived from the current image — otherwise an image bump breaks creation until rebuild.
-    return toDaytonaSandboxProvider({
-      manifest: record.manifest,
-      tenant_id,
-      logger,
-      build_metadata: record.build_metadata,
-    });
+    return toSandboxProviderFromRecord({ record, tenant_id, logger });
   }
   if (!configuration.STANDALONE) {
     return undefined;
@@ -212,17 +258,17 @@ export async function resolveSandboxProvider({
 }
 
 /**
- * Builds a Sandbox for one turn from a resolved provider and git mounts.
+ * Builds a Sandbox for one turn from a resolved provider and skill mounts.
  */
 export function buildTurnSandbox(input: {
   provider: SandboxProvider;
   logger: Logger;
-  gitSkills: readonly GitSkill[];
+  skills?: readonly Skill[];
   fileDownloadEnabled: boolean;
   existingSandboxId?: string | undefined;
   tracing: AgentTracing;
 }): Sandbox {
-  const skillMounter = input.gitSkills.length > 0 ? new SkillMounter([...input.gitSkills]) : undefined;
+  // Empty mounter still uploads requested-skills file so existing skills are cleaned up.
   return new Sandbox({
     provider: input.provider,
     existingSandboxId: input.existingSandboxId,
@@ -230,7 +276,7 @@ export function buildTurnSandbox(input: {
     blockDestructiveToolsInCodeMode: true,
     mcpRequestTimeoutMs: configuration.MCP_REQUEST_TIMEOUT_MS,
     mcpConnectTimeoutMs: configuration.MCP_CONNECT_TIMEOUT_MS,
-    ...(skillMounter ? { skillMounter } : {}),
+    skillMounter: new SkillMounter({ skills: input.skills ?? [] }),
     tracing: input.tracing,
     logger: input.logger,
   });
@@ -239,7 +285,7 @@ export function buildTurnSandbox(input: {
 /**
  * Cross-checks an AgentSpec against configured models / MCP / skills and
  * sandbox capability. Throws HTTPException(422) for semantic failures.
- * Skills are admitted by name only; mounts expand at turn time.
+ * Skills must exist in the skill store (git name) or pass SFY resolve (registry FQN).
  */
 export async function validateAgentSpec({
   spec,
@@ -281,10 +327,8 @@ export async function validateAgentSpec({
         await mcpServerStore.listServers({
           tenant_id,
           names,
-          limit: Math.max(names.length, 1),
-          page_token: undefined,
         })
-      ).data.map(record => record.name),
+      ).map(record => record.name),
     );
     const unknown = requestedMcpServers.find(server => !configuredNames.has(server.name));
     if (unknown !== undefined) {
@@ -296,14 +340,7 @@ export async function validateAgentSpec({
 
   const requestedSkills = spec.skills ?? [];
   if (requestedSkills.length > 0) {
-    const names = requestedSkills.map(skill => skill.name);
-    const configuredNames = new Set((await skillStore.listSkills({ tenant_id, names })).map(record => record.name));
-    const unknown = requestedSkills.find(skill => !configuredNames.has(skill.name));
-    if (unknown !== undefined) {
-      throw new HTTPException(422, {
-        message: `Unknown skill "${unknown.name}" — not configured`,
-      });
-    }
+    await skillStore.validateAgentSkills({ tenant_id, skills: requestedSkills });
   }
 
   const wantsSandbox = spec.config.sandbox.enabled;
@@ -317,5 +354,11 @@ export async function validateAgentSpec({
           : 'sandbox is enabled but no sandbox provider is configured — PUT /settings/sandbox-providers',
       });
     }
+  }
+
+  if (spec.config.web_search.enabled && resolveWebSearchProvider() === undefined) {
+    throw new HTTPException(422, {
+      message: 'web_search is enabled but no web-search provider is configured',
+    });
   }
 }

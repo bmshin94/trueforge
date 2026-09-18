@@ -23,6 +23,7 @@ export type AgentSessionsProps = {
 export type AgentSessionListRowProps = {
   title: string;
   agentName?: string;
+  sourceType?: 'schedule';
   lastActivityAt: string;
   metrics: {
     totalTurns: number;
@@ -31,6 +32,10 @@ export type AgentSessionListRowProps = {
   };
   active: boolean;
   onSelect: () => void;
+  /** Opens delete confirmation; does not call the API. */
+  onRequestDelete?: () => void;
+  /** When false, Delete is disabled via PermissionGuard. Defaults to true. */
+  canDelete?: boolean;
 };
 
 export type AgentSessionDetailHeaderProps = {
@@ -40,15 +45,25 @@ export type AgentSessionDetailHeaderProps = {
   createdAt?: string;
   view?: 'sessions' | null;
   onClose: () => void;
-  /** When set, shows Resume Chat / Resume Agent building. */
+  /**
+   * When set with `resumeLabel`, shows Resume Chat / Resume Agent building as a
+   * new-tab link (session deep link). Preferred over `onResume` when both are set.
+   */
+  resumeHref?: string;
+  /** In-shell resume fallback when no session deep link is available. */
   onResume?: () => void;
   /** Label for the resume action. */
   resumeLabel?: string;
+  /** Whether the current user may resume this session. */
+  canResume?: boolean;
 };
 
 export type AgentSessionTurnHeaderProps = {
   turnNumber: number;
   totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedTokens?: number;
   durationMs?: number;
   totalCostInUsd?: number;
 };
@@ -86,11 +101,23 @@ export type AgentDetailsTabsProps = {
   activeTab: AgentDetailsTab;
   onTabChange: (tab: AgentDetailsTab) => void;
   showMetrics?: boolean;
+  showSchedules?: boolean;
+  end?: ReactNode;
 };
 
 export type AgentMetricsProps = {
   agentId: string;
-};
+  showTimeRangeFilter?: boolean;
+} & (
+  | {
+      timeRange: SessionTimeRange;
+      onTimeRangeChange: (range: SessionTimeRange) => void;
+    }
+  | {
+      timeRange?: undefined;
+      onTimeRangeChange?: undefined;
+    }
+);
 
 export type AgentMetricChartResult = {
   definition: AgentMetricChartDefinition;
@@ -106,6 +133,11 @@ export type AgentMetricsViewProps = {
   chartsError?: string;
   timeRange: SessionTimeRange;
   onTimeRangeChange: (range: SessionTimeRange) => void;
+  showTimeRangeFilter?: boolean;
+};
+
+export type AgentMetricStatisticsProps = {
+  meters: AgentMetricMeter[];
 };
 
 export type AgentMetricsTimeRangeFilterProps = {
@@ -121,6 +153,7 @@ export type AgentMetricChartProps = {
   graph?: AgentMetricGraph;
   definition: AgentMetricChartDefinition;
   error?: string;
+  colorIndex?: number;
 };
 
 export type AgentOverviewProps = {
@@ -129,7 +162,7 @@ export type AgentOverviewProps = {
 
 export type AgentOverviewCardProps = {
   title: string;
-  icon: string;
+  icon?: string;
   count?: number;
   children: ReactNode;
 };

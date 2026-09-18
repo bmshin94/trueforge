@@ -2,7 +2,12 @@ import type { TrueForge, TrueForgeApi } from '@truefoundry/trueforge-sdk';
 import { readSessionIsCreateAgent } from '../../atoms/lib/sessionCreateAgent.js';
 import type { AgentSessionsServer, SessionListEntry } from '../../server/types.js';
 import { toListResult, toUiAgentSpec } from './chatServer.js';
-import { createTrueForgeClient, parseIsoDate, type CreateTrueForgeClientOptions } from './client.js';
+import {
+  createTrueForgeClient,
+  parseIsoDate,
+  resolveTrueForgeBaseUrl,
+  type CreateTrueForgeClientOptions,
+} from './client.js';
 import { toUiEventItem } from './toUiTurnState.js';
 import type { HarnessAgentSpec } from './types.js';
 
@@ -13,6 +18,7 @@ export type CreateHarnessAgentSessionsServerOptions = CreateTrueForgeClientOptio
 export type HarnessSessionListEntry = SessionListEntry<HarnessAgentSpec> & {
   isCreateAgent: boolean;
   isMutable: boolean;
+  sourceType?: 'schedule';
 };
 
 function toSessionListEntry(session: TrueForgeApi.Session): HarnessSessionListEntry {
@@ -25,12 +31,13 @@ function toSessionListEntry(session: TrueForgeApi.Session): HarnessSessionListEn
     isMutable: session.agent.type === 'inline',
     metrics: {
       totalTurns: session.metrics.totalTurns,
-      totalCostInUsd: session.metrics.totalCostInUsd,
+      ...(session.metrics.totalCostInUsd == null ? {} : { totalCostInUsd: session.metrics.totalCostInUsd }),
       totalDurationMs: session.metrics.totalDurationMs,
     },
     ...(session.title === null ? {} : { title: session.title }),
     ...(session.agent.type === 'reference' && session.agent.name !== null ? { agentName: session.agent.name } : {}),
     ...(session.agent.type === 'inline' ? { agentSpec: toUiAgentSpec(session.agent.spec) } : {}),
+    ...(session.source?.type === 'schedule' ? { sourceType: session.source.type } : {}),
   };
 }
 
@@ -45,11 +52,17 @@ export function createHarnessAgentSessionsServer(
       return {
         agentId: data.id,
         name: data.name,
+        description: data.description,
         agentSpec: toUiAgentSpec(data.manifest),
       };
     },
     async getCodeSnippets({ agentId }) {
-      const { data } = await client.internal.agents.getCodeSnippets(agentId);
+      // Snippet SDK `baseUrl` should not end with `/` (hosts often pass a trailing path slash).
+      const absoluteBaseUrl = resolveTrueForgeBaseUrl(options.baseUrl ?? '/').replace(/\/$/, '');
+      const { data } = await client.internal.agents.getCodeSnippets(
+        agentId,
+        /^https?:\/\//i.test(absoluteBaseUrl) ? { baseUrl: absoluteBaseUrl } : undefined,
+      );
       return data.snippets;
     },
     async listSessions(requestParams = {}) {
@@ -64,6 +77,7 @@ export function createHarnessAgentSessionsServer(
         ...(requestParams.agentId === undefined || requestParams.agentId.length === 0
           ? {}
           : { agentId: requestParams.agentId }),
+        ...(requestParams.createdByMe === undefined ? {} : { createdByMe: requestParams.createdByMe }),
       });
       return toListResult(page, toSessionListEntry);
     },

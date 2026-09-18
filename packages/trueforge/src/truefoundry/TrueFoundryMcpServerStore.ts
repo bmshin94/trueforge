@@ -1,13 +1,10 @@
-import type { TokenPagination } from '@truefoundry/trueforge-core/agent-session';
-import {
-  decodeOffsetPageToken,
-  paginateOffsetRows,
-} from '@truefoundry/trueforge-core/agent-session/store/OffsetPageToken';
 import { McpConnectionError, type RemoteMcpHeaders } from '@truefoundry/trueforge-core/core';
 import { HTTPException } from 'hono/http-exception';
-import type { RequestSubject } from '../auth/identity';
+import type { Logger } from 'winston';
+import type { RequestContext, RequestSubject } from '../auth/identity';
 import { safeReturnTo } from '../auth/safeReturnTo';
-import { getPublicBaseUrl } from '../config';
+import { getPublicUiBasePath } from '../config';
+import type { AgentRecord } from '../db/agentStore';
 import {
   McpServerNotFoundError,
   type AuthorizeMcpServerInput,
@@ -22,6 +19,8 @@ import {
 } from '../db/mcpServerStore';
 import type { OAuthClientRecord } from '../mcp/auth/types';
 import { resolveMcpAuthStatus, type McpAuthStatus } from '../schemas/mcpServer';
+import { accessTokenForRequest, asTrueFoundryRequestContext, type ResolveAccessToken } from './accessToken';
+import { trueFoundryManaged } from './errors';
 import { resolveDefaultGatewayUrl } from './mapEnabledModels';
 import {
   mapSfyMcpServers,
@@ -30,7 +29,6 @@ import {
   type SfyMcpServerSummary,
 } from './mapSfyMcpServers';
 import type { PerServerMcpHeaders } from './perServerMcpHeaders';
-import { TRUEFOUNDRY_MANAGED_MESSAGE, TRUEFOUNDRY_MANAGED_STATUS } from './trueFoundryManaged';
 import type { TrueFoundryServiceFoundryServerClient } from './TrueFoundryServiceFoundryServerClient';
 
 export type TrueFoundryMcpApiClient = Pick<
@@ -41,11 +39,8 @@ export type TrueFoundryMcpApiClient = Pick<
   | 'getMcpAuthorize'
   | 'getMcpAuthStatus'
   | 'deleteMcpAuth'
+  | 'vendToken'
 >;
-
-function managed(): never {
-  throw new HTTPException(TRUEFOUNDRY_MANAGED_STATUS, { message: TRUEFOUNDRY_MANAGED_MESSAGE });
-}
 
 function withoutAuthorization(headers: Record<string, string> | undefined): Record<string, string> {
   if (headers === undefined) {
@@ -54,12 +49,21 @@ function withoutAuthorization(headers: Record<string, string> | undefined): Reco
   return Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== 'authorization'));
 }
 
-/** Absolute FE landing for the upstream authorize `redirectURL` from `PUBLIC_BASE_URL` + safe `return_to`. */
-export function resolveAuthorizeRedirectURL(input: { returnTo?: string }): string {
+/**
+ * Absolute FE landing for the upstream authorize `redirectURL`.
+ * Origin from the tenant session `public_base_url`; UI path prefix from process
+ * `PUBLIC_BASE_URL` via {@link getPublicUiBasePath}. `return_to` is a browser path.
+ *
+ * TODO: add an env var for the public UI path prefix (do not keep deriving mount path from
+ * `PUBLIC_BASE_URL`) so tenant origin and path are independently configurable.
+ */
+export function resolveAuthorizeRedirectURL(input: { returnTo?: string; publicBaseUrl: string }): string {
   try {
-    return new URL(safeReturnTo(input.returnTo), `${getPublicBaseUrl()}/`).href;
+    const origin = new URL(input.publicBaseUrl).origin;
+    const publicBase = new URL(getPublicUiBasePath(), `${origin}/`);
+    return new URL(safeReturnTo(input.returnTo), publicBase).href;
   } catch (error) {
-    throw new McpConnectionError('PUBLIC_BASE_URL is required for TrueFoundry MCP OAuth but was empty', 500, {
+    throw new McpConnectionError('Tenant public base URL from session is required for TrueFoundry MCP OAuth', 500, {
       cause: error,
     });
   }
@@ -68,152 +72,155 @@ export function resolveAuthorizeRedirectURL(input: { returnTo?: string }): strin
 /** Read-only MCP registry for TrueFoundry mode (writes managed elsewhere). */
 export class TrueFoundryMcpServerStore<TTransaction = never> implements IMcpServerWithAuthStore<TTransaction> {
   readonly #client: TrueFoundryMcpApiClient;
-  readonly #accessToken: string;
+  readonly #asAgent: ResolveAccessToken;
+  readonly #asUser: ResolveAccessToken;
   readonly #subject: RequestSubject;
+  readonly #publicBaseUrl: string | undefined;
   readonly #perServerHeaders: PerServerMcpHeaders;
   #gatewayUrl: string | undefined;
 
   constructor(input: {
     client: TrueFoundryMcpApiClient;
-    accessToken: string;
-    subject: RequestSubject;
+    requestContext: RequestContext;
+    agent: AgentRecord | undefined;
     perServerHeaders?: PerServerMcpHeaders;
+    logger: Logger;
   }) {
     this.#client = input.client;
-    this.#accessToken = input.accessToken;
-    this.#subject = input.subject;
+    const requestContext = asTrueFoundryRequestContext(input.requestContext);
+    const tokens = accessTokenForRequest({
+      client: input.client,
+      requestContext,
+      agent: input.agent,
+      logger: input.logger,
+    });
+    this.#asAgent = tokens.asAgent;
+    this.#asUser = tokens.asUser;
+    this.#subject = requestContext.subject;
+    this.#publicBaseUrl = requestContext.public_base_url;
     this.#perServerHeaders = input.perServerHeaders ?? {};
   }
 
-  /** Caller Bearer plus optional per-server overrides; oauth servers re-check auth before invoke. */
+  /** Gateway Bearer (+ optional per-server overrides); SFY authorize first, else authRequired. */
   resolveInvokeHeaders(input: { record: McpServerRecord; userRef: string }): RemoteMcpHeaders {
     const { record, userRef } = input;
-    const staticHeaders = {
+    const headers = async (): Promise<Record<string, string>> => ({
       ...withoutAuthorization(this.#perServerHeaders[record.name]),
-      Authorization: `Bearer ${this.#accessToken}`,
-    };
-    if (record.manifest.auth?.type === 'dcr') {
-      return async () => {
-        const status = await this.authorize({
-          tenant_id: record.tenant_id,
-          name: record.name,
-          userRef,
-        });
-        if (status.status === 'auth_required') {
-          const authUrl = status.authorization_url;
-          if (authUrl === undefined || authUrl.length === 0) {
-            throw new HTTPException(422, {
-              message: `MCP server "${record.name}" requires authentication but returned no authorization URL`,
-            });
-          }
-          return {
-            authRequired: {
-              servers: [{ id: record.name, name: record.name, auth_url: authUrl }],
-            },
-          };
+      Authorization: `Bearer ${await this.#asUser()}`,
+    });
+    return async () => {
+      const status = await this.authorize({
+        tenant_id: record.tenant_id,
+        name: record.name,
+        userRef,
+      });
+      if (status.status === 'auth_required') {
+        const authUrl = status.authorization_url;
+        if (authUrl === undefined || authUrl.length === 0) {
+          throw new HTTPException(422, {
+            message: `MCP server "${record.name}" requires authentication but returned no authorization URL`,
+          });
         }
-        return { headers: staticHeaders };
-      };
-    }
-    return staticHeaders;
+        return {
+          authRequired: {
+            servers: [{ id: record.name, name: record.name, auth_url: authUrl }],
+          },
+        };
+      }
+      return { headers: await headers() };
+    };
   }
 
-  async listServers(
-    input: ListMcpServersInput,
-    transaction?: TTransaction,
-  ): Promise<{ data: McpServerRecord[]; pagination: TokenPagination }> {
+  async listServers(input: ListMcpServersInput, transaction?: TTransaction): Promise<McpServerRecord[]> {
     void transaction;
-    const offset = decodeOffsetPageToken(input.page_token);
     if (input.names?.length === 0) {
-      return paginateOffsetRows([], input.limit, offset);
+      return [];
     }
 
-    const rows = await this.#client.listMcpServers({
-      accessToken: this.#accessToken,
-      limit: input.limit + 1,
-      offset,
-      ...(input.names !== undefined ? { names: input.names } : {}),
-    });
-    const gatewayUrl = await this.#resolveGatewayUrl();
-    const records = mapSfyMcpServers({ rows }).map(server =>
-      toRecord({ tenant_id: input.tenant_id, server, gatewayUrl }),
-    );
-    return paginateOffsetRows(records, input.limit, offset);
+    const accessToken = await this.#asAgent();
+    const [rows, gatewayUrl] = await Promise.all([
+      this.#client.listMcpServers({
+        accessToken,
+        ...(input.names !== undefined ? { names: input.names } : {}),
+      }),
+      this.#resolveGatewayUrl(),
+    ]);
+    return mapSfyMcpServers({ rows }).map(server => toRecord({ tenant_id: input.tenant_id, server, gatewayUrl }));
   }
 
   async getServer(input: GetMcpServerInput, transaction?: TTransaction): Promise<McpServerRecord | undefined> {
     void transaction;
-    const row = await this.#client.getMcpServerByName({ accessToken: this.#accessToken, name: input.name });
+    const accessToken = await this.#asAgent();
+    const [row, gatewayUrl] = await Promise.all([
+      this.#client.getMcpServerByName({ accessToken, name: input.name }),
+      this.#resolveGatewayUrl(),
+    ]);
     if (row === undefined) {
       return undefined;
     }
     const server = parseSfyMcpServerSummary(row);
-    const gatewayUrl = await this.#resolveGatewayUrl();
     return toRecord({ tenant_id: input.tenant_id, server, gatewayUrl });
   }
 
   getServerForUpdate(input: GetMcpServerInput, transaction: TTransaction): Promise<McpServerRecord | undefined> {
     void input;
     void transaction;
-    return managed();
+    return trueFoundryManaged();
   }
 
   createServer(input: CreateMcpServerInput, transaction?: TTransaction): Promise<McpServerRecord> {
     void input;
     void transaction;
-    return managed();
+    return trueFoundryManaged();
   }
 
   upsertServer(input: UpsertMcpServerInput, transaction?: TTransaction): Promise<McpServerRecord> {
     void input;
     void transaction;
-    return managed();
+    return trueFoundryManaged();
   }
 
   saveClient(params: { id: string; record: OAuthClientRecord }, transaction?: TTransaction): Promise<void> {
     void params;
     void transaction;
-    return managed();
+    return trueFoundryManaged();
   }
 
   getClient(params: { id: string }, transaction?: TTransaction): Promise<OAuthClientRecord | undefined> {
     void params;
     void transaction;
-    return managed();
+    return trueFoundryManaged();
   }
 
   deleteClient(params: { id: string }, transaction?: TTransaction): Promise<void> {
     void params;
     void transaction;
-    return managed();
+    return trueFoundryManaged();
   }
 
   async resolveAuthStatuses(input: ResolveMcpAuthStatusesInput): Promise<ReadonlyMap<string, McpAuthStatus>> {
     void input.userRef;
     const out = new Map<string, McpAuthStatus>();
 
-    if (input.records.length > 1) {
-      for (const record of input.records) {
-        out.set(record.name, resolveMcpAuthStatus({ manifest: record.manifest }));
+    // List responses stay stubbed; single-server GET (e.g. GET /mcp-servers/{name}) hits SFY live status
+    // for every auth mode (oauth2, header/env per-user, …).
+    const [record] = input.records;
+    if (record === undefined || input.records.length !== 1) {
+      for (const item of input.records) {
+        out.set(item.name, resolveMcpAuthStatus({ manifest: item.manifest }));
       }
       return out;
     }
 
-    for (const record of input.records) {
-      if (record.manifest.auth?.type === 'dcr') {
-        out.set(
-          record.name,
-          await this.#client.getMcpAuthStatus({
-            accessToken: this.#accessToken,
-            mcpServerId: record.id,
-            subjectId: this.#subject.id,
-            subjectType: this.#subject.type,
-          }),
-        );
-        continue;
-      }
-      out.set(record.name, resolveMcpAuthStatus({ manifest: record.manifest }));
-    }
+    out.set(
+      record.name,
+      await this.#client.getMcpAuthStatus({
+        accessToken: await this.#asUser(),
+        mcpServerId: record.id,
+        subjectId: this.#subject.id,
+        subjectType: this.#subject.type,
+      }),
+    );
     return out;
   }
 
@@ -223,10 +230,15 @@ export class TrueFoundryMcpServerStore<TTransaction = never> implements IMcpServ
     if (record === undefined) {
       throw new McpServerNotFoundError(input.name);
     }
+    const publicBaseUrl = this.#publicBaseUrl;
+    if (publicBaseUrl === undefined || publicBaseUrl.trim() === '') {
+      throw new McpConnectionError('Tenant public base URL from session is required for TrueFoundry MCP OAuth', 500);
+    }
     return this.#client.getMcpAuthorize({
-      accessToken: this.#accessToken,
+      accessToken: await this.#asUser(),
       mcpServerId: record.id,
       redirectURL: resolveAuthorizeRedirectURL({
+        publicBaseUrl,
         ...(input.returnTo !== undefined ? { returnTo: input.returnTo } : {}),
       }),
     });
@@ -239,7 +251,7 @@ export class TrueFoundryMcpServerStore<TTransaction = never> implements IMcpServ
       throw new McpServerNotFoundError(input.name);
     }
     await this.#client.deleteMcpAuth({
-      accessToken: this.#accessToken,
+      accessToken: await this.#asUser(),
       mcpServerId: record.id,
       subjectId: this.#subject.id,
       subjectType: this.#subject.type,
@@ -249,7 +261,8 @@ export class TrueFoundryMcpServerStore<TTransaction = never> implements IMcpServ
 
   async #resolveGatewayUrl(): Promise<string> {
     if (this.#gatewayUrl === undefined) {
-      this.#gatewayUrl = resolveDefaultGatewayUrl(await this.#client.listGatewayInstallations(this.#accessToken));
+      const installations = await this.#client.listGatewayInstallations(await this.#asAgent());
+      this.#gatewayUrl = resolveDefaultGatewayUrl(installations);
     }
     return this.#gatewayUrl;
   }

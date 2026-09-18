@@ -1,6 +1,6 @@
 # Reference
-## Agents
-<details><summary><code>client.agents.<a href="/src/api/resources/agents/client/Client.ts">list</a>() -> TrueForge.ListAgentsResponse</code></summary>
+## Internal
+<details><summary><code>client.internal.<a href="/src/api/resources/internal/client/Client.ts">listPermissions</a>({ ...params }) -> TrueForge.ListPermissionsResponse</code></summary>
 <dl>
 <dd>
 
@@ -12,7 +12,7 @@
 <dl>
 <dd>
 
-All configured agents for the tenant.
+Return granted actions for the requested resources.
 </dd>
 </dl>
 </dd>
@@ -27,7 +27,10 @@ All configured agents for the tenant.
 <dd>
 
 ```typescript
-await client.agents.list();
+await client.internal.listPermissions({
+    resourceIds: ["resource_ids"],
+    resourceType: "agent"
+});
 
 ```
 </dd>
@@ -39,6 +42,90 @@ await client.agents.list();
 
 <dl>
 <dd>
+
+<dl>
+<dd>
+
+**request:** `TrueForge.ListPermissionsRequest` 
+    
+</dd>
+</dl>
+
+<dl>
+<dd>
+
+**requestOptions:** `InternalClient.RequestOptions` 
+    
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+</dd>
+</dl>
+</details>
+
+## Agents
+<details><summary><code>client.agents.<a href="/src/api/resources/agents/client/Client.ts">list</a>({ ...params }) -> core.Page&lt;TrueForge.Agent, TrueForge.ListAgentsResponse&gt;</code></summary>
+<dl>
+<dd>
+
+#### 📝 Description
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+List configured agents for the tenant, ordered by name. Optional `agent_name` filters by substring.
+</dd>
+</dl>
+</dd>
+</dl>
+
+#### 🔌 Usage
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+```typescript
+const pageableResponse = await client.agents.list();
+for await (const item of pageableResponse) {
+    console.log(item);
+}
+
+// Or you can manually iterate page-by-page
+let page = await client.agents.list();
+while (page.hasNextPage()) {
+    page = page.getNextPage();
+}
+
+// You can also access the underlying response
+const response = page.response;
+
+```
+</dd>
+</dl>
+</dd>
+</dl>
+
+#### ⚙️ Parameters
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+**request:** `TrueForge.ListAgentsRequest` 
+    
+</dd>
+</dl>
 
 <dl>
 <dd>
@@ -83,6 +170,7 @@ Creates an agent and allocates an immutable id. Fails if `name` is already taken
 
 ```typescript
 await client.agents.create({
+    description: "description",
     manifest: {
         model: {
             name: "name"
@@ -200,7 +288,7 @@ await client.agents.get("agent_id");
 <dl>
 <dd>
 
-Replaces the manifest for an existing agent keyed by immutable `agent_id`.
+Update an existing agent by immutable id.
 </dd>
 </dl>
 </dd>
@@ -277,7 +365,7 @@ await client.agents.update("agent_id", {
 <dl>
 <dd>
 
-Delete a configured agent by immutable id. Idempotent if already gone.
+Delete a configured agent by immutable id.
 </dd>
 </dl>
 </dd>
@@ -441,7 +529,7 @@ await client.server.getCapabilities();
 </details>
 
 ## MCP Servers
-<details><summary><code>client.mcpServers.<a href="/src/api/resources/mcpServers/client/Client.ts">list</a>({ ...params }) -> core.Page&lt;TrueForge.AvailableMcpServer, TrueForge.ListAvailableMcpServersResponse&gt;</code></summary>
+<details><summary><code>client.mcpServers.<a href="/src/api/resources/mcpServers/client/Client.ts">list</a>() -> TrueForge.ListAvailableMcpServersResponse</code></summary>
 <dl>
 <dd>
 
@@ -453,7 +541,7 @@ await client.server.getCapabilities();
 <dl>
 <dd>
 
-Paginated MCP servers as a slim name/url list for the composer.
+Configured MCP servers as a slim name/url list for the composer.
 </dd>
 </dl>
 </dd>
@@ -484,7 +572,62 @@ await client.mcpServers.list();
 <dl>
 <dd>
 
-**request:** `TrueForge.ListMcpServersRequest` 
+**requestOptions:** `McpServersClient.RequestOptions` 
+    
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+</dd>
+</dl>
+</details>
+
+<details><summary><code>client.mcpServers.<a href="/src/api/resources/mcpServers/client/Client.ts">get</a>(name) -> TrueForge.GetAvailableMcpServerResponse</code></summary>
+<dl>
+<dd>
+
+#### 📝 Description
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+A single MCP server as the slim chat projection, with live per-user auth_status.
+</dd>
+</dl>
+</dd>
+</dl>
+
+#### 🔌 Usage
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+```typescript
+await client.mcpServers.get("name");
+
+```
+</dd>
+</dl>
+</dd>
+</dl>
+
+#### ⚙️ Parameters
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+**name:** `string` — MCP server name.
     
 </dd>
 </dl>
@@ -770,7 +913,7 @@ await client.models.list();
 <dl>
 <dd>
 
-List schedules for the tenant, newest first. Optionally filter by `agent_names`.
+List schedules for the tenant, newest first.
 </dd>
 </dl>
 </dd>
@@ -785,7 +928,19 @@ List schedules for the tenant, newest first. Optionally filter by `agent_names`.
 <dd>
 
 ```typescript
-await client.schedules.list();
+const pageableResponse = await client.schedules.list();
+for await (const item of pageableResponse) {
+    console.log(item);
+}
+
+// Or you can manually iterate page-by-page
+let page = await client.schedules.list();
+while (page.hasNextPage()) {
+    page = page.getNextPage();
+}
+
+// You can also access the underlying response
+const response = page.response;
 
 ```
 </dd>
@@ -1159,7 +1314,7 @@ await client.schedules.delete("schedule_id");
 </dl>
 </details>
 
-<details><summary><code>client.schedules.<a href="/src/api/resources/schedules/client/Client.ts">listRuns</a>(schedule_id) -> TrueForge.ListScheduleRunsResponse</code></summary>
+<details><summary><code>client.schedules.<a href="/src/api/resources/schedules/client/Client.ts">listRuns</a>(schedule_id, { ...params }) -> core.Page&lt;TrueForge.ScheduleRun, TrueForge.ListScheduleRunsResponse&gt;</code></summary>
 <dl>
 <dd>
 
@@ -1171,7 +1326,7 @@ await client.schedules.delete("schedule_id");
 <dl>
 <dd>
 
-List runs of a schedule, newest `scheduled_for` first. Only the schedule creator (or an admin) may list its runs.
+List runs of a schedule, newest `scheduled_for` first. Available to its creator or a manager of its agent.
 </dd>
 </dl>
 </dd>
@@ -1186,7 +1341,19 @@ List runs of a schedule, newest `scheduled_for` first. Only the schedule creator
 <dd>
 
 ```typescript
-await client.schedules.listRuns("schedule_id");
+const pageableResponse = await client.schedules.listRuns("schedule_id");
+for await (const item of pageableResponse) {
+    console.log(item);
+}
+
+// Or you can manually iterate page-by-page
+let page = await client.schedules.listRuns("schedule_id");
+while (page.hasNextPage()) {
+    page = page.getNextPage();
+}
+
+// You can also access the underlying response
+const response = page.response;
 
 ```
 </dd>
@@ -1203,6 +1370,14 @@ await client.schedules.listRuns("schedule_id");
 <dd>
 
 **schedule_id:** `string` — Immutable schedule identifier.
+    
+</dd>
+</dl>
+
+<dl>
+<dd>
+
+**request:** `TrueForge.ListRunsSchedulesRequest` 
     
 </dd>
 </dl>
@@ -1235,7 +1410,7 @@ await client.schedules.listRuns("schedule_id");
 <dl>
 <dd>
 
-List the caller's sessions (newest first by default), token-paginated. Results are scoped to the authenticated identity via the session store's `created_by_subject.subject_id` filter (not a client query param). Optional `agent_id` filters to sessions bound to that named agent. Pass `page_token` to fetch the next page, keeping the other query params constant.
+List the sessions (newest first by default).
 </dd>
 </dl>
 </dd>
@@ -1250,7 +1425,19 @@ List the caller's sessions (newest first by default), token-paginated. Results a
 <dd>
 
 ```typescript
-await client.sessions.list();
+const pageableResponse = await client.sessions.list();
+for await (const item of pageableResponse) {
+    console.log(item);
+}
+
+// Or you can manually iterate page-by-page
+let page = await client.sessions.list();
+while (page.hasNextPage()) {
+    page = page.getNextPage();
+}
+
+// You can also access the underlying response
+const response = page.response;
 
 ```
 </dd>
@@ -1491,7 +1678,7 @@ await client.sessions.delete("session_id");
 <dl>
 <dd>
 
-Update a session by replacing `agent` with `{ spec: AgentSpec }`. Named (reference) sessions reject agent updates. An empty body is a valid no-op that refreshes `updated_at`. Only the session creator may update it.
+Update a session: optional `title`, `metadata`, and (inline sessions only) `agent` as `{ spec: AgentSpec }`. Named sessions reject agent updates. An empty body is a valid no-op that refreshes `updated_at`. Only the session creator may update it.
 </dd>
 </dl>
 </dd>
@@ -1648,7 +1835,19 @@ List session events as `{ turn_id, event }` across the active turn branch (newes
 <dd>
 
 ```typescript
-await client.sessions.listEvents("session_id");
+const pageableResponse = await client.sessions.listEvents("session_id");
+for await (const item of pageableResponse) {
+    console.log(item);
+}
+
+// Or you can manually iterate page-by-page
+let page = await client.sessions.listEvents("session_id");
+while (page.hasNextPage()) {
+    page = page.getNextPage();
+}
+
+// You can also access the underlying response
+const response = page.response;
 
 ```
 </dd>
@@ -1719,7 +1918,19 @@ List turns for a session (newest first by default), token-paginated. Only the se
 <dd>
 
 ```typescript
-await client.sessions.listTurns("session_id");
+const pageableResponse = await client.sessions.listTurns("session_id");
+for await (const item of pageableResponse) {
+    console.log(item);
+}
+
+// Or you can manually iterate page-by-page
+let page = await client.sessions.listTurns("session_id");
+while (page.hasNextPage()) {
+    page = page.getNextPage();
+}
+
+// You can also access the underlying response
+const response = page.response;
 
 ```
 </dd>
@@ -2095,7 +2306,19 @@ Paginated persisted events for a turn (insertion order by default). Only the ses
 <dd>
 
 ```typescript
-await client.sessions.listTurnEvents("session_id", "turn_id");
+const pageableResponse = await client.sessions.listTurnEvents("session_id", "turn_id");
+for await (const item of pageableResponse) {
+    console.log(item);
+}
+
+// Or you can manually iterate page-by-page
+let page = await client.sessions.listTurnEvents("session_id", "turn_id");
+while (page.hasNextPage()) {
+    page = page.getNextPage();
+}
+
+// You can also access the underlying response
+const response = page.response;
 
 ```
 </dd>
@@ -2269,6 +2492,71 @@ await client.skills.list();
 
 <dl>
 <dd>
+
+<dl>
+<dd>
+
+**requestOptions:** `SkillsClient.RequestOptions` 
+    
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+</dd>
+</dl>
+</details>
+
+<details><summary><code>client.skills.<a href="/src/api/resources/skills/client/Client.ts">listVersions</a>({ ...params }) -> TrueForge.ListSkillVersionsResponse</code></summary>
+<dl>
+<dd>
+
+#### 📝 Description
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+Versions for one skill.
+</dd>
+</dl>
+</dd>
+</dl>
+
+#### 🔌 Usage
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+```typescript
+await client.skills.listVersions({
+    name: "name"
+});
+
+```
+</dd>
+</dl>
+</dd>
+</dl>
+
+#### ⚙️ Parameters
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+**request:** `TrueForge.ListVersionsSkillsRequest` 
+    
+</dd>
+</dl>
 
 <dl>
 <dd>
@@ -2700,6 +2988,72 @@ await client.internal.metrics.getMeters({
 </dl>
 </details>
 
+## Internal Schedules
+<details><summary><code>client.internal.schedules.<a href="/src/api/resources/internal/resources/schedules/client/Client.ts">executeRun</a>({ ...params }) -> void</code></summary>
+<dl>
+<dd>
+
+#### 📝 Description
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+Execute a persisted schedule run using its saved schedule and agent.
+</dd>
+</dl>
+</dd>
+</dl>
+
+#### 🔌 Usage
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+```typescript
+await client.internal.schedules.executeRun({
+    scheduleRunId: "schedule_run_id"
+});
+
+```
+</dd>
+</dl>
+</dd>
+</dl>
+
+#### ⚙️ Parameters
+
+<dl>
+<dd>
+
+<dl>
+<dd>
+
+**request:** `TrueForge.internal.ExecuteScheduleRunRequest` 
+    
+</dd>
+</dl>
+
+<dl>
+<dd>
+
+**requestOptions:** `SchedulesClient.RequestOptions` 
+    
+</dd>
+</dl>
+</dd>
+</dl>
+
+
+</dd>
+</dl>
+</details>
+
 ## Internal Sessions
 <details><summary><code>client.internal.sessions.<a href="/src/api/resources/internal/resources/sessions/client/Client.ts">getOrCreateByExternalId</a>({ ...params }) -> TrueForge.GetSessionResponse</code></summary>
 <dl>
@@ -2770,7 +3124,7 @@ await client.internal.sessions.getOrCreateByExternalId({
 </details>
 
 ## Internal Agents
-<details><summary><code>client.internal.agents.<a href="/src/api/resources/internal/resources/agents/client/Client.ts">getCodeSnippets</a>(agent_id) -> TrueForge.GetAgentCodeSnippetsResponse</code></summary>
+<details><summary><code>client.internal.agents.<a href="/src/api/resources/internal/resources/agents/client/Client.ts">getCodeSnippets</a>(agent_id, { ...params }) -> TrueForge.GetAgentCodeSnippetsResponse</code></summary>
 <dl>
 <dd>
 
@@ -2782,7 +3136,7 @@ await client.internal.sessions.getOrCreateByExternalId({
 <dl>
 <dd>
 
-TypeScript TrueForge SDK samples (stream and non-stream) for creating a session and turn against this agent.
+TrueForge SDK samples (TypeScript and Python, stream and non-stream) for a session and turn against this agent.
 </dd>
 </dl>
 </dd>
@@ -2821,6 +3175,14 @@ await client.internal.agents.getCodeSnippets("agent_id");
 <dl>
 <dd>
 
+**request:** `TrueForge.internal.GetCodeSnippetsAgentsRequest` 
+    
+</dd>
+</dl>
+
+<dl>
+<dd>
+
 **requestOptions:** `AgentsClient.RequestOptions` 
     
 </dd>
@@ -2834,7 +3196,7 @@ await client.internal.agents.getCodeSnippets("agent_id");
 </details>
 
 ## Settings McpServers
-<details><summary><code>client.settings.mcpServers.<a href="/src/api/resources/settings/resources/mcpServers/client/Client.ts">list</a>({ ...params }) -> core.Page&lt;TrueForge.ConfiguredMcpServer, TrueForge.ListMcpServersResponse&gt;</code></summary>
+<details><summary><code>client.settings.mcpServers.<a href="/src/api/resources/settings/resources/mcpServers/client/Client.ts">list</a>() -> TrueForge.ListMcpServersResponse</code></summary>
 <dl>
 <dd>
 
@@ -2846,7 +3208,7 @@ await client.internal.agents.getCodeSnippets("agent_id");
 <dl>
 <dd>
 
-Paginated MCP servers with auth_status. Header secrets are redacted.
+Configured MCP servers with auth_status. Header secrets are redacted.
 </dd>
 </dl>
 </dd>
@@ -2873,14 +3235,6 @@ await client.settings.mcpServers.list();
 
 <dl>
 <dd>
-
-<dl>
-<dd>
-
-**request:** `TrueForge.settings.ListMcpServersRequest` 
-    
-</dd>
-</dl>
 
 <dl>
 <dd>

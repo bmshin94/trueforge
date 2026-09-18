@@ -1,17 +1,20 @@
+import type { Skill as SkillMount } from '@truefoundry/trueforge-core/core';
+import { resolveGitTurnSkills, validateGitAgentSkills } from '../db/gitSkillMounts';
 import type {
+  AgentSkillsInput,
   CreateSkillInput,
-  GetSkillInput,
   ISkillStore,
   ListSkillsInput,
   SkillRecord,
   UpsertSkillInput,
 } from '../db/skillStore';
+import type { SkillVersion } from '../schemas/skill';
 import type { InlineSkills } from './inlineResources';
 
 /**
  * Serves the skills a request brought with it, and delegates everything else.
  *
- * Mirrors {@link InlineMcpServerStore}: by-name lookup and name-filtered list are overlaid, an
+ * Mirrors {@link InlineMcpServerStore}: name-filtered list and validate/resolve are overlaid, an
  * unfiltered list passes through so request-scoped skills stay out of the tenant's settings, and
  * writes delegate because there is no row to write.
  */
@@ -24,14 +27,12 @@ export class InlineSkillStore<TTransaction = never> implements ISkillStore<TTran
     this.#inline = input.inline;
   }
 
-  async getSkill(input: GetSkillInput, transaction?: TTransaction): Promise<SkillRecord | undefined> {
-    const record = this.#toRecord(input.tenant_id, input.name);
-    return record ?? (await this.#inner.getSkill(input, transaction));
-  }
-
   async listSkills(input: ListSkillsInput, transaction?: TTransaction): Promise<SkillRecord[]> {
     if (input.names === undefined) {
       return this.#inner.listSkills(input, transaction);
+    }
+    if (input.names.length === 0) {
+      return [];
     }
 
     const inlineRecords = input.names
@@ -39,7 +40,9 @@ export class InlineSkillStore<TTransaction = never> implements ISkillStore<TTran
       .filter((record): record is SkillRecord => record !== undefined);
     const registryNames = input.names.filter(name => this.#inline[name] === undefined);
     const registryRecords =
-      registryNames.length > 0 ? await this.#inner.listSkills({ ...input, names: registryNames }, transaction) : [];
+      registryNames.length > 0
+        ? await this.#inner.listSkills({ ...input, names: registryNames }, transaction)
+        : [];
 
     return [...inlineRecords, ...registryRecords];
   }
@@ -52,12 +55,51 @@ export class InlineSkillStore<TTransaction = never> implements ISkillStore<TTran
     return this.#inner.upsertSkill(input, transaction);
   }
 
+  listSkillVersions(input: { name: string }): Promise<SkillVersion[]> {
+    if (this.#inline[input.name] !== undefined) {
+      return Promise.resolve([]);
+    }
+    return this.#inner.listSkillVersions(input);
+  }
+
+  async validateAgentSkills(input: AgentSkillsInput, transaction?: TTransaction): Promise<void> {
+    const { inlineSkills, registrySkills } = this.#partition(input.skills);
+    if (inlineSkills.length > 0) {
+      await validateGitAgentSkills(this, { tenant_id: input.tenant_id, skills: inlineSkills });
+    }
+    if (registrySkills.length > 0) {
+      await this.#inner.validateAgentSkills({ tenant_id: input.tenant_id, skills: registrySkills }, transaction);
+    }
+  }
+
+  async resolveTurnSkills(input: AgentSkillsInput): Promise<SkillMount[]> {
+    const { inlineSkills, registrySkills } = this.#partition(input.skills);
+    const inlineMounts =
+      inlineSkills.length > 0
+        ? await resolveGitTurnSkills(this, { tenant_id: input.tenant_id, skills: inlineSkills })
+        : [];
+    const registryMounts =
+      registrySkills.length > 0
+        ? await this.#inner.resolveTurnSkills({ tenant_id: input.tenant_id, skills: registrySkills })
+        : [];
+    return [...inlineMounts, ...registryMounts];
+  }
+
+  #partition(skills: AgentSkillsInput['skills']): {
+    inlineSkills: AgentSkillsInput['skills'];
+    registrySkills: AgentSkillsInput['skills'];
+  } {
+    const inlineSkills = skills.filter(skill => this.#inline[skill.name] !== undefined);
+    const registrySkills = skills.filter(skill => this.#inline[skill.name] === undefined);
+    return { inlineSkills, registrySkills };
+  }
+
   #toRecord(tenant_id: string, name: string): SkillRecord | undefined {
     const manifest = this.#inline[name];
     if (manifest === undefined) {
       return undefined;
     }
     const now = new Date().toISOString();
-    return { tenant_id, name, manifest, created_at: now, updated_at: now };
+    return { tenant_id, name: manifest.name, manifest, created_at: now, updated_at: now };
   }
 }

@@ -1,4 +1,4 @@
-import type { TokenPagination } from '@truefoundry/trueforge-core/agent-session';
+import { CreatedBySubjectSchema, type TokenPagination } from '@truefoundry/trueforge-core/agent-session';
 import {
   decodeOffsetPageToken,
   paginateOffsetRows,
@@ -6,7 +6,6 @@ import {
 import { sql, type Kysely, type Selectable, type Transaction } from 'kysely';
 import { nextTriggerAfter } from '../../../runtime/cron';
 import { newId } from '../../../utils/id';
-import { parseStoredCreatedBySubject } from '../../createdBySubject';
 import {
   cronRunName,
   parseStoredScheduleManifest,
@@ -16,6 +15,8 @@ import {
   type CreateScheduleInput,
   type CreateScheduleRunInput,
   type DeleteScheduleInput,
+  type GetOwnedIdsInput,
+  type GetRunByIdInput,
   type GetRunInput,
   type GetScheduledRunForInput,
   type GetScheduleInput,
@@ -30,7 +31,7 @@ import {
   type UpdateScheduleRunStatusInput,
 } from '../../scheduleStore';
 import { isUniqueViolation } from '../client';
-import { json, now } from '../sqlExpressions';
+import { json, now, whereCreatedByOrAgentIds } from '../sqlExpressions';
 import type { Database, ScheduleRunTable, ScheduleTable } from '../types';
 
 function toScheduleRecord(row: Selectable<ScheduleTable>): ScheduleRecord {
@@ -42,7 +43,7 @@ function toScheduleRecord(row: Selectable<ScheduleTable>): ScheduleRecord {
     name: row.name,
     manifest: parseStoredScheduleManifest(row.manifest),
     status: row.status,
-    created_by_subject: parseStoredCreatedBySubject(row.created_by_subject),
+    created_by_subject: CreatedBySubjectSchema.parse(row.created_by_subject),
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
   };
@@ -56,8 +57,9 @@ function toRunRecord(row: Selectable<ScheduleRunTable>): ScheduleRunRecord {
     name: row.name,
     scheduled_for: row.scheduled_for.toISOString(),
     status: row.status,
-    created_by_subject: parseStoredCreatedBySubject(row.created_by_subject),
+    created_by_subject: CreatedBySubjectSchema.parse(row.created_by_subject),
     triggered_at: row.triggered_at === null ? null : row.triggered_at.toISOString(),
+    reason: row.reason,
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
   };
@@ -230,9 +232,7 @@ export class PostgresScheduleStore implements IScheduleStore<Transaction<Databas
     if (input.agent_names !== undefined) {
       query = query.where('agent_name', 'in', [...input.agent_names]);
     }
-    if (input.created_by_subject_id !== undefined) {
-      query = query.where(sql`created_by_subject->>'subject_id'`, '=', input.created_by_subject_id);
-    }
+    query = whereCreatedByOrAgentIds(query, input.created_by_or_agent_ids);
     const rows = await query
       .orderBy('created_at', 'desc')
       .orderBy('id')
@@ -243,7 +243,26 @@ export class PostgresScheduleStore implements IScheduleStore<Transaction<Databas
     return { data: data.map(toScheduleRecord), pagination };
   }
 
-  async listRuns(input: ListRunsInput, transaction?: Transaction<Database>): Promise<ScheduleRunRecord[]> {
+  async getOwnedIds(input: GetOwnedIdsInput, transaction?: Transaction<Database>): Promise<readonly string[]> {
+    if (input.ids.length === 0) {
+      return [];
+    }
+    const db = transaction ?? this.#db;
+    const rows = await db
+      .selectFrom('schedule')
+      .select('id')
+      .where('tenant_id', '=', input.tenant_id)
+      .where('id', 'in', [...input.ids])
+      .where(sql`created_by_subject->>'subject_id'`, '=', input.subject_id)
+      .execute();
+    return rows.map(row => row.id);
+  }
+
+  async listRuns(
+    input: ListRunsInput,
+    transaction?: Transaction<Database>,
+  ): Promise<{ data: ScheduleRunRecord[]; pagination: TokenPagination }> {
+    const offset = decodeOffsetPageToken(input.page_token);
     const db = transaction ?? this.#db;
     const rows = await db
       .selectFrom('schedule_run')
@@ -252,8 +271,11 @@ export class PostgresScheduleStore implements IScheduleStore<Transaction<Databas
       .where('schedule_id', '=', input.schedule_id)
       .orderBy('scheduled_for', 'desc')
       .orderBy('id')
+      .limit(input.limit + 1)
+      .offset(offset)
       .execute();
-    return rows.map(toRunRecord);
+    const { data, pagination } = paginateOffsetRows(rows, input.limit, offset);
+    return { data: data.map(toRunRecord), pagination };
   }
 
   async getRun(input: GetRunInput, transaction?: Transaction<Database>): Promise<ScheduleRunRecord | undefined> {
@@ -264,6 +286,15 @@ export class PostgresScheduleStore implements IScheduleStore<Transaction<Databas
       .where('tenant_id', '=', input.tenant_id)
       .where('id', '=', input.id)
       .executeTakeFirst();
+    return row === undefined ? undefined : toRunRecord(row);
+  }
+
+  async getRunById(
+    input: GetRunByIdInput,
+    transaction?: Transaction<Database>,
+  ): Promise<ScheduleRunRecord | undefined> {
+    const db = transaction ?? this.#db;
+    const row = await db.selectFrom('schedule_run').selectAll().where('id', '=', input.id).executeTakeFirst();
     return row === undefined ? undefined : toRunRecord(row);
   }
 
@@ -296,6 +327,7 @@ export class PostgresScheduleStore implements IScheduleStore<Transaction<Databas
           status: input.status,
           created_by_subject: json(input.created_by_subject),
           triggered_at: input.triggered_at ?? null,
+          reason: input.reason ?? null,
           created_at: now(),
           updated_at: now(),
         })
@@ -315,10 +347,12 @@ export class PostgresScheduleStore implements IScheduleStore<Transaction<Databas
     transaction?: Transaction<Database>,
   ): Promise<ScheduleRunRecord | undefined> {
     const db = transaction ?? this.#db;
+    const timestamp = now();
+    const reason = input.status === 'failed' ? (input.reason ?? null) : null;
     const patch =
       input.status === 'triggered'
-        ? { status: input.status, triggered_at: now(), updated_at: now() }
-        : { status: input.status, updated_at: now() };
+        ? { status: input.status, triggered_at: timestamp, reason, updated_at: timestamp }
+        : { status: input.status, reason, updated_at: timestamp };
     const row = await db
       .updateTable('schedule_run')
       .set(patch)

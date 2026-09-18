@@ -73,7 +73,7 @@ describe('capabilities routers', () => {
     const db = createSqliteDb(':memory:');
     return withAuth(
       createCapabilitiesRouter({
-        sandboxProviderStore: new SqliteSandboxProviderStore(db),
+        resolveSandboxProviderStore: () => new SqliteSandboxProviderStore(db),
         withTransaction: callback => db.transaction().execute(callback),
         logger: silentLogger,
         resolveRequestContext,
@@ -97,6 +97,7 @@ describe('capabilities routers', () => {
           reason: 'Skills run in a sandbox, which is not configured.',
         },
         settings: { enabled: true },
+        web_search: { enabled: false },
       },
     });
   });
@@ -119,6 +120,7 @@ describe('capabilities routers', () => {
         sandbox: { enabled: true },
         skill: { enabled: true },
         settings: { enabled: true },
+        web_search: { enabled: false },
       },
     });
   });
@@ -135,6 +137,7 @@ describe('capabilities routers', () => {
         sandbox: { enabled: true },
         skill: { enabled: true },
         settings: { enabled: true },
+        web_search: { enabled: false },
       },
     });
   });
@@ -246,7 +249,7 @@ describe('capabilities routers', () => {
       await migrateSqliteToLatest(db);
       const router = withAuth(
         createCapabilitiesRouter({
-          sandboxProviderStore: new SqliteSandboxProviderStore(db),
+          resolveSandboxProviderStore: () => new SqliteSandboxProviderStore(db),
           withTransaction: callback => db.transaction().execute(callback),
           logger: silentLogger,
           resolveRequestContext,
@@ -266,6 +269,7 @@ describe('capabilities routers', () => {
             reason: 'Skills run in a sandbox, which is not configured.',
           },
           settings: { enabled: true },
+          web_search: { enabled: false },
         },
       });
 
@@ -281,6 +285,7 @@ describe('capabilities routers', () => {
             reason: 'Skills run in a sandbox, which is not configured.',
           },
           settings: { enabled: false },
+          web_search: { enabled: false },
         },
       });
     });

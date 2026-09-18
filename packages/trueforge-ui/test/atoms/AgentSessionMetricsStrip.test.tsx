@@ -7,7 +7,7 @@ import type { SessionMetrics } from '@/utils/buildSessionMetrics.js';
 
 const metrics: SessionMetrics = {
   totalTurns: 7,
-  wallTimeMs: 120_000,
+  wallTimeMs: 188_000,
   totalCostUsd: 2.6229,
   totalTokens: 280_000,
   contextTokens: 280_000,
@@ -42,6 +42,7 @@ describe('AgentSessionMetricsStrip', () => {
     expect(screen.getByText('Turns')).toBeInTheDocument();
     expect(screen.getByText('7')).toBeInTheDocument();
     expect(screen.getByText('Duration')).toBeInTheDocument();
+    expect(screen.getByText('3m 8s')).toBeInTheDocument();
     expect(screen.getByText('Cost')).toBeInTheDocument();
     expect(screen.getByText('$2.6229')).toBeInTheDocument();
     expect(screen.getByText('Tokens')).toBeInTheDocument();
@@ -64,5 +65,8 @@ describe('AgentSessionMetricsStrip', () => {
 
     render(<AgentSessionMetricsStrip metrics={metricsWithoutCost} />);
     expect(screen.queryByText('Cost')).not.toBeInTheDocument();
+    expect(document.querySelector('[data-slot="agent-session-metrics-strip"] > div')).toHaveClass(
+      '@min-[48rem]:grid-cols-7',
+    );
   });
 });

@@ -12,16 +12,19 @@ import {
 } from 'react';
 
 import { useAui } from '../assistant-ui.js';
-import { auiButtonClass } from '../atoms/lib/buttonClasses.js';
+import { auiButtonClass, sidebarRailButtonClassName } from '../atoms/lib/buttonClasses.js';
 import { cn } from '../atoms/lib/cn.js';
+import { useIsMobile } from '../atoms/lib/useIsMobile.js';
 import { NamedAgentHeaderLabel } from '../atoms/NamedAgentHeaderLabel.js';
+import { PageHeader } from '../atoms/PageHeader.js';
 import { Spinner } from '../atoms/primitives/Spinner.js';
 import { ShellActions } from '../atoms/ShellActions.js';
 import { AgentConfigDrawerContainer } from '../containers/AgentConfigDrawerContainer.js';
 import { Thread } from '../containers/Thread.js';
+import { ThreadListContainer } from '../containers/ThreadListContainer.js';
 import { useChatHeaderContentVisible } from '../hooks/useChatChromeActionsVisible.js';
 import { Icon } from '../icons/Icon.js';
-import { shellIsCreateAgent, useOptionalShellMode } from '../server/ShellModeContext.js';
+import { shellIsCreateAgent, useOptionalShellMode, type ShellMode } from '../server/ShellModeContext.js';
 import { resolveBrandChrome } from '../theme/brand.js';
 import { useSlot } from '../theme/SlotsProvider.js';
 import { useBrand } from '../theme/ThemeProvider.js';
@@ -32,13 +35,16 @@ const SchedulesPage = lazy(() =>
 );
 
 const brandLogoClassName = 'h-5 w-5 max-w-40 shrink-0 object-contain';
-const railWidthClassName = 'w-18';
+const railWidthClassName = 'w-20';
 
-const railActionButtonClassName =
-  'h-auto w-full flex-col gap-1 whitespace-normal px-1 py-1.5 text-[10px] leading-tight !justify-center text-text-primary shadow-none hover:bg-ghost-button-hover hover:text-ghost-button-text';
+const railActionButtonClassName = cn(sidebarRailButtonClassName, 'text-sidebar-text');
 
 const railSelectedClassName =
-  'bg-primary-button-bg text-primary-button-text hover:bg-primary-button-hover hover:text-primary-button-text';
+  'bg-primary-button-bg font-medium text-primary-button-text hover:bg-primary-button-hover hover:text-primary-button-text';
+
+function isRecentHistoryVisible({ overlayOpen, mode }: { overlayOpen: boolean; mode?: ShellMode }): boolean {
+  return !overlayOpen && mode?.status === 'active' && !mode.isCreateAgent;
+}
 
 function SidebarNav(): ReactNode {
   const aui = useAui();
@@ -53,7 +59,11 @@ function SidebarNav(): ReactNode {
     shell?.sessionsOpen === true ||
     shell?.schedulesOpen === true;
   const mode = shell?.mode;
-  const newChatSelected = !overlayOpen && mode?.status === 'active' && mode.isMutable && !mode.isCreateAgent;
+  const newChatSelected =
+    !overlayOpen &&
+    mode?.status === 'active' &&
+    !mode.isCreateAgent &&
+    shell?.historyAgentFilter?.intent !== 'try-agent';
   const newAgentSelected = !overlayOpen && mode != null && shellIsCreateAgent(mode);
 
   const handleNewChat = () => {
@@ -77,7 +87,7 @@ function SidebarNav(): ReactNode {
   };
 
   return (
-    <nav className="flex min-h-0 flex-1 flex-col items-center gap-2 p-1" aria-label="Sidebar">
+    <nav className="flex min-h-0 flex-1 flex-col items-center gap-1 p-1" aria-label="Sidebar">
       {showNewActions ? (
         <button
           type="button"
@@ -90,7 +100,7 @@ function SidebarNav(): ReactNode {
           })}
           onClick={handleNewChat}
         >
-          <Icon name="square-pen" size={16} />
+          <Icon name="square-pen" size={14} />
           <span className="text-center">New Chat</span>
         </button>
       ) : null}
@@ -106,8 +116,8 @@ function SidebarNav(): ReactNode {
           })}
           onClick={handleNewAgent}
         >
-          <Icon name="agent-2" size={16} />
-          <span className="text-center">New Agent</span>
+          <Icon name="agent-2" size={14} />
+          <span className="text-center whitespace-nowrap">Build Agent</span>
         </button>
       ) : null}
       <AgentsLibraryButton compact />
@@ -131,6 +141,7 @@ function SidebarRail({
   const brand = useBrand();
   const chrome = resolveBrandChrome(brand);
   const BrandLogo = useSlot('BrandLogo');
+  const UserAvatar = useSlot('UserAvatar');
 
   return (
     <aside
@@ -154,6 +165,7 @@ function SidebarRail({
       <SidebarNav />
       <footer className="flex shrink-0 flex-col items-center border-border p-2">
         <ShellActions labeled className="flex-col" />
+        <UserAvatar labeled className="mt-1" />
       </footer>
     </aside>
   );
@@ -161,6 +173,7 @@ function SidebarRail({
 
 export function SidebarLayout({ className }: { className?: string }) {
   const shell = useOptionalShellMode();
+  const isMobile = useIsMobile();
   const AgentDetailsPage = useSlot('AgentDetailsPage');
   const AgentsLibrary = useSlot('AgentsLibrary');
   const SessionsPage = useSlot('SessionsPage');
@@ -178,6 +191,9 @@ export function SidebarLayout({ className }: { className?: string }) {
   const sessionsOpen = shell?.sessionsOpen === true;
   const schedulesOpen = shell?.schedulesOpen === true;
   const overlayOpen = settingsOpen || libraryOpen || sessionsOpen || schedulesOpen;
+  const showAgentConfig =
+    shell != null && shellIsCreateAgent(shell.mode) && !overlayOpen && (!isMobile || shell.agentConfigOpen);
+  const showRecentHistory = isRecentHistoryVisible({ overlayOpen, mode: shell?.mode });
   const hasChatHeaderContent = useChatHeaderContentVisible();
 
   useEffect(() => {
@@ -208,22 +224,30 @@ export function SidebarLayout({ className }: { className?: string }) {
     <div className={cn('relative flex h-full min-h-0 w-full min-w-0', className)}>
       <SidebarRail className="hidden md:flex" />
 
+      {showAgentConfig ? (
+        <aside
+          role="dialog"
+          aria-label="Agent Config"
+          className="absolute inset-y-0 left-0 z-20 w-full max-w-sm border-r border-border shadow-xl md:static md:z-auto md:max-w-140 md:flex-1 md:shadow-none 2xl:max-w-150"
+        >
+          <AgentConfigDrawerContainer showClose={isMobile} />
+        </aside>
+      ) : null}
+
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-primary-bg">
         {/* Desktop keeps shell chrome in the rail footer (always mounted, including
             when visually hidden on small screens so host action-slot state persists).
             Mobile reaches theme/settings via the nav drawer rail. */}
-        <header
+        <PageHeader
           className={cn(
-            'flex shrink-0 items-center gap-1 border-b border-border bg-topbar-bg px-2 py-1.5',
+            'bg-topbar-bg',
             // Desktop: hide when settings/idle or the thread header has nothing to show
             // (empty untitled draft). Mobile still needs the menu button.
-            // Keep visible while Agent Config is open so New Agent / title stay in chrome;
-            // SaveAgentButton is omitted below to avoid duplicating the drawer's save control.
+            // Builder mode keeps New Agent and its actions beside the persistent config.
             (overlayOpen || isIdle || !hasChatHeaderContent) && 'md:hidden',
           )}
-        >
-          {!overlayOpen ? (
-            <>
+          start={
+            !overlayOpen ? (
               <button
                 ref={menuBtnRef}
                 type="button"
@@ -234,72 +258,76 @@ export function SidebarLayout({ className }: { className?: string }) {
               >
                 <Icon name="bars" />
               </button>
-              <NamedAgentHeaderLabel />
-              <span className="min-w-0 flex-1" />
-              <ClearChatButton />
-              {!shell?.agentConfigOpen ? <SaveAgentButton /> : null}
-            </>
-          ) : (
-            <span className="min-w-0 flex-1" />
-          )}
-        </header>
+            ) : null
+          }
+          title={!overlayOpen ? <NamedAgentHeaderLabel /> : null}
+          end={
+            !overlayOpen ? (
+              <>
+                <ClearChatButton />
+                <SaveAgentButton />
+              </>
+            ) : null
+          }
+        />
 
-        <div ref={mainRef} className="min-h-0 min-w-0 flex-1">
-          {settingsOpen ? (
-            <Suspense
-              fallback={
-                <div
-                  className="flex h-full items-center justify-center"
-                  role="status"
-                  aria-live="polite"
-                  aria-busy="true"
-                >
-                  <Spinner size={28} className="text-text-primary" />
-                  <span className="sr-only">Loading</span>
-                </div>
-              }
+        <div className="flex min-h-0 min-w-0 flex-1">
+          {showRecentHistory ? (
+            <aside
+              aria-label="Recent chats"
+              className="hidden min-h-0 w-64 shrink-0 border-r border-border bg-sidebar-bg md:flex"
             >
-              <TruefoundrySettingsBuilder />
-            </Suspense>
-          ) : sessionsOpen ? (
-            <SessionsPage />
-          ) : libraryOpen && shell?.libraryAgentId != null ? (
-            <AgentDetailsPage key={shell.libraryAgentId} agentId={shell.libraryAgentId} />
-          ) : libraryOpen ? (
-            <AgentsLibrary onSelectAgent={() => setMobileNavOpen(false)} />
-          ) : schedulesOpen ? (
-            <Suspense
-              fallback={
-                <div
-                  className="flex h-full items-center justify-center"
-                  role="status"
-                  aria-live="polite"
-                  aria-busy="true"
-                >
-                  <Spinner size={28} className="text-text-primary" />
-                  <span className="sr-only">Loading</span>
-                </div>
-              }
-            >
-              <SchedulesPage />
-            </Suspense>
-          ) : isIdle ? (
-            <SelectAgentEmptyState />
-          ) : (
-            <Thread />
-          )}
+              <ThreadListContainer variant="recent-history" />
+            </aside>
+          ) : null}
+
+          <div ref={mainRef} className="min-h-0 min-w-0 flex-1">
+            {settingsOpen ? (
+              <Suspense
+                fallback={
+                  <div
+                    className="flex h-full items-center justify-center"
+                    role="status"
+                    aria-live="polite"
+                    aria-busy="true"
+                  >
+                    <Spinner size={28} className="text-text-primary" />
+                    <span className="sr-only">Loading</span>
+                  </div>
+                }
+              >
+                <TruefoundrySettingsBuilder />
+              </Suspense>
+            ) : sessionsOpen ? (
+              <SessionsPage />
+            ) : libraryOpen && shell?.libraryAgentId != null ? (
+              <AgentDetailsPage key={shell.libraryAgentId} agentId={shell.libraryAgentId} />
+            ) : libraryOpen ? (
+              <AgentsLibrary onSelectAgent={() => setMobileNavOpen(false)} />
+            ) : schedulesOpen ? (
+              <Suspense
+                fallback={
+                  <div
+                    className="flex h-full items-center justify-center"
+                    role="status"
+                    aria-live="polite"
+                    aria-busy="true"
+                  >
+                    <Spinner size={28} className="text-text-primary" />
+                    <span className="sr-only">Loading</span>
+                  </div>
+                }
+              >
+                <SchedulesPage />
+              </Suspense>
+            ) : isIdle ? (
+              <SelectAgentEmptyState />
+            ) : (
+              <Thread />
+            )}
+          </div>
         </div>
       </div>
-
-      {shell?.agentConfigOpen ? (
-        <aside
-          role="dialog"
-          aria-label="Agent Config"
-          className="absolute inset-y-0 right-0 z-20 w-full max-w-sm border-l border-border shadow-xl md:static md:z-auto md:w-[22rem] md:max-w-none md:shrink-0 md:shadow-none"
-        >
-          <AgentConfigDrawerContainer />
-        </aside>
-      ) : null}
 
       {/* Mobile: same narrow rail as desktop */}
       {mobileNavOpen ? (

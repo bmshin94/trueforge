@@ -1,7 +1,9 @@
 'use client';
 
+import { Icon } from '../../icons/Icon.js';
 import type { AgentSkill, AgentSpec, ConnectorState, McpToolSelection } from '../../server/types.js';
 import { useSlot } from '../../theme/SlotsProvider.js';
+import { Button } from '../primitives/Button.js';
 import { CenteredModal } from '../primitives/CenteredModal.js';
 
 export type AgentResourceConfigModalProps = {
@@ -13,12 +15,15 @@ export type AgentResourceConfigModalProps = {
   query: string;
   activeConnectorId: string | null;
   tools: McpToolSelection[];
+  toolsByConnector?: Record<string, McpToolSelection[]>;
+  connectorLoading: boolean;
+  connectorError: string | null;
   toolsLoading: boolean;
   toolsError: string | null;
   onQueryChange: (query: string) => void;
   onSelectConnector: (connectorId: string) => void;
   onRetryTools: () => void;
-  onRefreshConnectors?: () => Promise<void>;
+  onRefreshConnector?: () => void;
   onChange: (spec: AgentSpec) => void;
   onClose: () => void;
 };
@@ -31,14 +36,27 @@ export function AgentResourceConfigModal({ editor, onClose, ...contentProps }: A
     <CenteredModal
       open={editor !== null}
       onOpenChange={open => !open && onClose()}
-      title={selectingMcp ? 'MCP Servers' : 'Skills'}
+      title={selectingMcp ? 'Select MCP Tools' : 'Skills'}
       className={
         selectingMcp
           ? 'md:w-[min(64rem,calc(100%-3rem))] md:max-w-5xl'
           : 'md:w-[min(40rem,calc(100%-3rem))] md:max-w-2xl'
       }
       contentSized
-      aria-label={selectingMcp ? 'Edit Connectors' : 'Edit skills'}
+      aria-label={selectingMcp ? 'Select MCP Tools' : 'Edit skills'}
+      footer={
+        selectingMcp ? (
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-text-secondary flex min-w-0 items-center gap-1.5 text-xs">
+              <Icon name="shield-check" className="text-warning-bg size-3.5 shrink-0" />
+              <span className="min-w-0">Shielded tools always ask before the agent runs them.</span>
+            </p>
+            <Button.Primary type="button" onClick={onClose}>
+              Save
+            </Button.Primary>
+          </div>
+        ) : undefined
+      }
     >
       {editor ? <AgentResourceEditorContent editor={editor} {...contentProps} /> : null}
     </CenteredModal>

@@ -44,7 +44,7 @@ const registrySkill: SkillRecord = {
 function mcpStoreWith(inlineRaw: object) {
   const inner = {
     getServer: jest.fn().mockResolvedValue(registryServer),
-    listServers: jest.fn().mockResolvedValue({ data: [registryServer], pagination: { limit: 10 } }),
+    listServers: jest.fn().mockResolvedValue([registryServer]),
     resolveInvokeHeaders: jest.fn().mockReturnValue({ Authorization: 'Bearer caller-token' }),
     resolveAuthStatuses: jest.fn().mockResolvedValue(new Map([['team-mcp', { status: 'not_required' }]])),
   } as unknown as IMcpServerWithAuthStore;
@@ -57,8 +57,10 @@ function mcpStoreWith(inlineRaw: object) {
 
 function skillStoreWith(inlineRaw: object) {
   const inner = {
-    getSkill: jest.fn().mockResolvedValue(registrySkill),
     listSkills: jest.fn().mockResolvedValue([registrySkill]),
+    validateAgentSkills: jest.fn().mockResolvedValue(undefined),
+    resolveTurnSkills: jest.fn().mockResolvedValue([]),
+    listSkillVersions: jest.fn().mockResolvedValue([]),
   } as unknown as ISkillStore;
   const store = new InlineSkillStore({ inner, inline: parseInlineSkills(JSON.stringify(inlineRaw)) });
   return { store, inner };
@@ -149,11 +151,9 @@ describe('InlineMcpServerStore', () => {
   it('answers a name-filtered list from both sources, which is what spec validation asks for', async () => {
     const { store } = mcpStoreWith({ 'docs-mcp': DOCS_MCP });
 
-    const { data } = await store.listServers({
+    const data = await store.listServers({
       tenant_id: 'default',
       names: ['docs-mcp', 'team-mcp'],
-      limit: 10,
-      page_token: undefined,
     });
 
     expect(data.map(record => record.name)).toEqual(['docs-mcp', 'team-mcp']);
@@ -162,11 +162,9 @@ describe('InlineMcpServerStore', () => {
   it('keeps request-scoped servers out of an unfiltered list, so they never reach tenant settings', async () => {
     const { store } = mcpStoreWith({ 'docs-mcp': DOCS_MCP });
 
-    const { data } = await store.listServers({
+    const data = await store.listServers({
       tenant_id: 'default',
       names: undefined,
-      limit: 10,
-      page_token: undefined,
     });
 
     expect(data.map(record => record.name)).toEqual(['team-mcp']);
@@ -185,7 +183,7 @@ describe('InlineSkillStore', () => {
   it('exposes the git mount fields that turn execution expands', async () => {
     const { store } = skillStoreWith({ 'ask-ai': ASK_AI_SKILL });
 
-    const record = await store.getSkill({ tenant_id: 'default', name: 'ask-ai' });
+    const [record] = await store.listSkills({ tenant_id: 'default', names: ['ask-ai'] });
 
     expect(record?.manifest).toEqual({ ...ASK_AI_SKILL, type: 'git', name: 'ask-ai' });
   });

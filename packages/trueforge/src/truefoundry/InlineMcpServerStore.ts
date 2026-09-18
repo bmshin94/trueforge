@@ -1,8 +1,3 @@
-import type { TokenPagination } from '@truefoundry/trueforge-core/agent-session';
-import {
-  decodeOffsetPageToken,
-  paginateOffsetRows,
-} from '@truefoundry/trueforge-core/agent-session/store/OffsetPageToken';
 import type { RemoteMcpHeaders } from '@truefoundry/trueforge-core/core';
 import type {
   AuthorizeMcpServerInput,
@@ -53,34 +48,24 @@ export class InlineMcpServerStore<TTransaction = never> implements IMcpServerWit
     return record ?? (await this.#inner.getServer(input, transaction));
   }
 
-  async listServers(
-    input: ListMcpServersInput,
-    transaction?: TTransaction,
-  ): Promise<{ data: McpServerRecord[]; pagination: TokenPagination }> {
+  async listServers(input: ListMcpServersInput, transaction?: TTransaction): Promise<McpServerRecord[]> {
     if (input.names === undefined) {
       return this.#inner.listServers(input, transaction);
+    }
+    if (input.names.length === 0) {
+      return [];
     }
 
     const inlineRecords = input.names
       .map(name => this.#toRecord(input.tenant_id, name))
       .filter((record): record is McpServerRecord => record !== undefined);
     const registryNames = input.names.filter(name => this.#inline[name] === undefined);
-
-    // An `IN (...)` filter cannot return more rows than names asked for, so one unpaged read
-    // gives the whole match set and the merged result can be paginated here.
     const registryRecords =
       registryNames.length > 0
-        ? (
-            await this.#inner.listServers(
-              { ...input, names: registryNames, limit: registryNames.length, page_token: undefined },
-              transaction,
-            )
-          ).data
+        ? await this.#inner.listServers({ ...input, names: registryNames }, transaction)
         : [];
 
-    const offset = decodeOffsetPageToken(input.page_token);
-    const merged = [...inlineRecords, ...registryRecords];
-    return paginateOffsetRows(merged.slice(offset, offset + input.limit + 1), input.limit, offset);
+    return [...inlineRecords, ...registryRecords];
   }
 
   async resolveAuthStatuses(input: ResolveMcpAuthStatusesInput): Promise<ReadonlyMap<string, McpAuthStatus>> {
@@ -135,6 +120,6 @@ export class InlineMcpServerStore<TTransaction = never> implements IMcpServerWit
       return undefined;
     }
     const now = new Date().toISOString();
-    return { id: name, tenant_id, name, manifest, created_at: now, updated_at: now };
+    return { id: name, tenant_id, name: manifest.name, manifest, created_at: now, updated_at: now };
   }
 }

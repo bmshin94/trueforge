@@ -1,4 +1,3 @@
-import { TrueForge } from '@truefoundry/trueforge-sdk';
 import type { Logger } from 'winston';
 import { Controller } from './controller/Controller';
 import { scheduleDispatchLoop } from './controller/scheduleDispatch';
@@ -6,25 +5,24 @@ import type { IScheduleStore } from './db/scheduleStore';
 import type { WithTransaction } from './db/transaction';
 
 /**
- * The loops the controller runs.
+ * Controller whose schedule loop hands runs to the server over HTTP
+ * (`SERVER_URL` + `TRUEFORGE_API_KEY` from process config). Standalone uses
+ * loopback; distributed uses the dedicated controller against the server Service.
  */
 export function createController<TTransaction>(params: {
   scheduleStore: IScheduleStore<TTransaction>;
   withTransaction: WithTransaction<TTransaction>;
   logger: Logger;
-  baseUrl: string;
 }): Controller {
-  const { scheduleStore, withTransaction, logger, baseUrl } = params;
   return new Controller({
     loops: [
       scheduleDispatchLoop({
-        scheduleStore,
-        client: new TrueForge({ baseUrl, auth: false }),
-        withTransaction,
-        logger,
+        scheduleStore: params.scheduleStore,
+        withTransaction: params.withTransaction,
+        logger: params.logger,
       }),
     ],
-    logger,
+    logger: params.logger,
   });
 }
 
@@ -35,7 +33,6 @@ export function runController<TTransaction>(params: {
   scheduleStore: IScheduleStore<TTransaction>;
   withTransaction: WithTransaction<TTransaction>;
   logger: Logger;
-  baseUrl: string;
   gracefulTimeoutSeconds: number;
   /** Releases what the caller opened for the loops, e.g. its database pool. */
   onStopped?: () => Promise<void>;

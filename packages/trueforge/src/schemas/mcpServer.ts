@@ -3,20 +3,24 @@
  * document, admin/chat list projections, and auth_status. Catalog file schemas
  * live in mcpCatalog.ts.
  *
+ * McpServerManifest is a `type`-discriminated oneOf of
+ * RemoteMcpServerManifest | TrueFoundryMcpServerManifest.
+ *
  * Auth: `header` stores shared request headers on the row.
  * Turn execution resolves DCR tokens via resolveMcpAuth.
  */
 import { z } from '@hono/zod-openapi';
-import { TokenPaginationSchema } from '@truefoundry/trueforge-core/agent-session';
 import type { OAuthToken } from '../mcp/auth/types';
 import { NameSchema } from './common';
+
+const MCP_SERVER_TYPES = ['remote', 'truefoundry'] as const;
 
 /**
  * Transport/kind of MCP server.
  * `remote` — user-configured URL (standalone / local registry).
  * `truefoundry` — TrueFoundry-managed: gateway proxy URL.
  */
-export const McpServerTypeSchema = z.enum(['remote', 'truefoundry']).openapi('MCPServerType');
+export const McpServerTypeSchema = z.enum(MCP_SERVER_TYPES).openapi('MCPServerType');
 
 const McpServerHeaderAuthSchema = z
   .object({
@@ -52,18 +56,33 @@ export const McpServerDescriptionSchema = z
   .min(1)
   .describe('Concise summary of what this MCP server provides.');
 
-/** Configured MCP server document persisted as `mcp_server.manifest`. */
-export const McpServerManifestObjectSchema = z
+/** User-configured remote MCP endpoint. */
+const RemoteMcpServerManifestSchema = z
   .object({
-    type: McpServerTypeSchema,
+    type: z.literal(McpServerTypeSchema.enum.remote),
     name: NameSchema,
-    url: z.url().describe('MCP endpoint URL. For `truefoundry`, the resolved AI Gateway proxy URL.'),
+    url: z.url().describe('MCP endpoint URL.'),
     description: McpServerDescriptionSchema,
     auth: McpServerManifestAuthSchema.optional(),
   })
-  .strict();
+  .strict()
+  .openapi('RemoteMCPServerManifest');
 
-export const McpServerManifestSchema = McpServerManifestObjectSchema.openapi('MCPServerManifest');
+/** TrueFoundry-managed MCP server; `url` is the resolved AI Gateway proxy URL. */
+const TrueFoundryMcpServerManifestSchema = z
+  .object({
+    type: z.literal(McpServerTypeSchema.enum.truefoundry),
+    name: NameSchema,
+    url: z.url().describe('Resolved AI Gateway proxy URL for this TrueFoundry-managed MCP server.'),
+    description: McpServerDescriptionSchema,
+    auth: McpServerManifestAuthSchema.optional(),
+  })
+  .strict()
+  .openapi('TrueFoundryMCPServerManifest');
+
+export const McpServerManifestSchema = z
+  .discriminatedUnion('type', [RemoteMcpServerManifestSchema, TrueFoundryMcpServerManifestSchema])
+  .openapi('MCPServerManifest');
 
 export const McpAuthStatusSchema = z
   .object({
@@ -107,7 +126,6 @@ export const GetMcpServerResponseSchema = z.object({ data: ConfiguredMcpServerSc
 export const ListMcpServersResponseSchema = z
   .object({
     data: z.array(ConfiguredMcpServerSchema),
-    pagination: TokenPaginationSchema,
   })
   .openapi('ListMCPServersResponse');
 
@@ -134,12 +152,17 @@ export const AvailableMcpServerSchema = z
 export const ListAvailableMcpServersResponseSchema = z
   .object({
     data: z.array(AvailableMcpServerSchema),
-    pagination: TokenPaginationSchema,
   })
   .openapi('ListAvailableMCPServersResponse');
 
+export const GetAvailableMcpServerResponseSchema = z
+  .object({ data: AvailableMcpServerSchema })
+  .openapi('GetAvailableMCPServerResponse');
+
 export type McpServerType = z.infer<typeof McpServerTypeSchema>;
 export type McpServerManifestAuth = z.infer<typeof McpServerManifestAuthSchema>;
+export type RemoteMcpServerManifest = z.infer<typeof RemoteMcpServerManifestSchema>;
+export type TrueFoundryMcpServerManifest = z.infer<typeof TrueFoundryMcpServerManifestSchema>;
 export type McpServerManifest = z.infer<typeof McpServerManifestSchema>;
 export type McpAuthStatus = z.infer<typeof McpAuthStatusSchema>;
 export type McpServerAuthPublic = z.infer<typeof McpServerAuthPublicSchema>;

@@ -1,5 +1,6 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { extractErrorLogFields } from '@truefoundry/trueforge-core/core';
+import type { Context } from 'hono';
 import type { Logger } from 'winston';
 import { hasAdminRole, type ResolveRequestContext } from '../auth/identity';
 import type { ISandboxProviderStore } from '../db/sandboxProviderStore';
@@ -8,6 +9,7 @@ import { getCapabilitiesRoute } from '../routes/capabilityRoutes';
 import { isLocalSandboxFallbackEnabled } from '../sandbox/localRuntime';
 import { checkSnapshotStatus } from '../sandbox/providerUtils';
 import type { SandboxBuildStatus } from '../schemas/sandboxProvider';
+import { resolveWebSearchProvider } from '../websearch/providers';
 
 /**
  * Why skills are unavailable, keyed off the sandbox build status.
@@ -21,7 +23,7 @@ function skillDisabledReason(status: SandboxBuildStatus | undefined): string {
 }
 
 export function createCapabilitiesRouter<TTransaction>(deps: {
-  sandboxProviderStore: ISandboxProviderStore<TTransaction>;
+  resolveSandboxProviderStore: (c: Context) => ISandboxProviderStore<TTransaction>;
   withTransaction: WithTransaction<TTransaction>;
   logger: Logger;
   resolveRequestContext: ResolveRequestContext;
@@ -34,7 +36,7 @@ export function createCapabilitiesRouter<TTransaction>(deps: {
     let status: SandboxBuildStatus | undefined;
     try {
       const refreshed = await checkSnapshotStatus({
-        store: deps.sandboxProviderStore,
+        store: deps.resolveSandboxProviderStore(c),
         tenant_id: requestContext.tenant_id,
         logger: deps.logger,
       });
@@ -44,12 +46,14 @@ export function createCapabilitiesRouter<TTransaction>(deps: {
     }
     const sandboxEnabled = status === 'ready' || (status === undefined && isLocalSandboxFallbackEnabled());
     const settingsEnabled = hasAdminRole(requestContext);
+    const webSearchEnabled = resolveWebSearchProvider() !== undefined;
     return c.json(
       {
         data: {
           sandbox: { enabled: sandboxEnabled },
           skill: sandboxEnabled ? { enabled: true } : { enabled: false, reason: skillDisabledReason(status) },
           settings: { enabled: settingsEnabled },
+          web_search: { enabled: webSearchEnabled },
         },
       },
       200,
