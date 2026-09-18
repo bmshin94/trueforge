@@ -9,6 +9,7 @@ import { Tooltip } from '../primitives/Tooltip.js';
 export type AgentRuntimeConfigFieldsProps = {
   value: AgentRuntimeConfig;
   sandboxAvailable: boolean;
+  webSearchAvailable?: boolean;
   hasSkills: boolean;
   disabled?: boolean;
   showCapabilities?: boolean;
@@ -42,6 +43,7 @@ type RuntimeSwitchField = {
 export function AgentRuntimeConfigFields({
   value,
   sandboxAvailable,
+  webSearchAvailable = false,
   hasSkills,
   disabled = false,
   showCapabilities = true,
@@ -67,6 +69,16 @@ export function AgentRuntimeConfigFields({
       checked: value.askUserQuestions?.enabled ?? true,
       update: enabled => ({ ...value, askUserQuestions: { enabled } }),
     },
+    ...(webSearchAvailable
+      ? [
+          {
+            label: 'Web search',
+            description: 'Allow the agent to search the web and fetch pages.',
+            checked: value.webSearch?.enabled ?? true,
+            update: (enabled: boolean) => ({ ...value, webSearch: { enabled } }),
+          } satisfies RuntimeSwitchField,
+        ]
+      : []),
   ];
   const sandboxEnabled = value.sandbox?.enabled ?? false;
   const compactionEnabled = value.contextManagement?.compaction?.enabled ?? true;
