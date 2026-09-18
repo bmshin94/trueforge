@@ -148,6 +148,14 @@ describe('InlineMcpServerStore', () => {
     expect(await store.getServer({ tenant_id: 'default', name: 'team-mcp' })).toEqual(registryServer);
   });
 
+  it('does not treat Object.prototype keys as inline resources', async () => {
+    const { store, inner } = mcpStoreWith({ 'docs-mcp': DOCS_MCP });
+
+    await store.getServer({ tenant_id: 'default', name: 'constructor' });
+
+    expect(inner.getServer).toHaveBeenCalledWith({ tenant_id: 'default', name: 'constructor' }, undefined);
+  });
+
   it('answers a name-filtered list from both sources, which is what spec validation asks for', async () => {
     const { store } = mcpStoreWith({ 'docs-mcp': DOCS_MCP });
 

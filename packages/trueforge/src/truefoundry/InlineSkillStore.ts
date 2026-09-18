@@ -36,13 +36,11 @@ export class InlineSkillStore<TTransaction = never> implements ISkillStore<TTran
     }
 
     const inlineRecords = input.names
-      .map(name => this.#toRecord(input.tenant_id, name))
+      .map(name => this.#toRecord({ tenant_id: input.tenant_id, name }))
       .filter((record): record is SkillRecord => record !== undefined);
     const registryNames = input.names.filter(name => this.#inline[name] === undefined);
     const registryRecords =
-      registryNames.length > 0
-        ? await this.#inner.listSkills({ ...input, names: registryNames }, transaction)
-        : [];
+      registryNames.length > 0 ? await this.#inner.listSkills({ ...input, names: registryNames }, transaction) : [];
 
     return [...inlineRecords, ...registryRecords];
   }
@@ -94,12 +92,18 @@ export class InlineSkillStore<TTransaction = never> implements ISkillStore<TTran
     return { inlineSkills, registrySkills };
   }
 
-  #toRecord(tenant_id: string, name: string): SkillRecord | undefined {
-    const manifest = this.#inline[name];
+  #toRecord(input: { tenant_id: string; name: string }): SkillRecord | undefined {
+    const manifest = this.#inline[input.name];
     if (manifest === undefined) {
       return undefined;
     }
     const now = new Date().toISOString();
-    return { tenant_id, name: manifest.name, manifest, created_at: now, updated_at: now };
+    return {
+      tenant_id: input.tenant_id,
+      name: manifest.name,
+      manifest,
+      created_at: now,
+      updated_at: now,
+    };
   }
 }

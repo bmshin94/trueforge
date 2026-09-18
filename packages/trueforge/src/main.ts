@@ -550,6 +550,9 @@ async function createServerRuntime<TTransaction>(persistence: ServerPersistence<
       runAsAgent,
       rawPerServerHeaders === undefined ? undefined : parsePerServerMcpHeaders(rawPerServerHeaders),
     );
+    if (!isTrueFoundryModeEnabled(configuration)) {
+      return store;
+    }
     const rawInline = c.req.header(X_TFG_MCP);
     if (rawInline === undefined) {
       return store;
@@ -560,6 +563,9 @@ async function createServerRuntime<TTransaction>(persistence: ServerPersistence<
   const resolveSandboxProviderStore = (c: Context) => persistence.resolveSandboxProviderStore(resolveRequestContext(c));
   const resolveSkillStore = (c: Context) => {
     const store = persistence.resolveSkillStore(resolveRequestContext(c));
+    if (!isTrueFoundryModeEnabled(configuration)) {
+      return store;
+    }
     const rawInline = c.req.header(X_TFG_SKILLS);
     if (rawInline === undefined) {
       return store;

@@ -44,7 +44,7 @@ export class InlineMcpServerStore<TTransaction = never> implements IMcpServerWit
   }
 
   async getServer(input: GetMcpServerInput, transaction?: TTransaction): Promise<McpServerRecord | undefined> {
-    const record = this.#toRecord(input.tenant_id, input.name);
+    const record = this.#toRecord({ tenant_id: input.tenant_id, name: input.name });
     return record ?? (await this.#inner.getServer(input, transaction));
   }
 
@@ -57,13 +57,11 @@ export class InlineMcpServerStore<TTransaction = never> implements IMcpServerWit
     }
 
     const inlineRecords = input.names
-      .map(name => this.#toRecord(input.tenant_id, name))
+      .map(name => this.#toRecord({ tenant_id: input.tenant_id, name }))
       .filter((record): record is McpServerRecord => record !== undefined);
     const registryNames = input.names.filter(name => this.#inline[name] === undefined);
     const registryRecords =
-      registryNames.length > 0
-        ? await this.#inner.listServers({ ...input, names: registryNames }, transaction)
-        : [];
+      registryNames.length > 0 ? await this.#inner.listServers({ ...input, names: registryNames }, transaction) : [];
 
     return [...inlineRecords, ...registryRecords];
   }
@@ -114,12 +112,19 @@ export class InlineMcpServerStore<TTransaction = never> implements IMcpServerWit
   }
 
   /** `id` is the name: nothing is persisted, and the name is what identifies these downstream. */
-  #toRecord(tenant_id: string, name: string): McpServerRecord | undefined {
-    const manifest = this.#inline[name];
+  #toRecord(input: { tenant_id: string; name: string }): McpServerRecord | undefined {
+    const manifest = this.#inline[input.name];
     if (manifest === undefined) {
       return undefined;
     }
     const now = new Date().toISOString();
-    return { id: name, tenant_id, name: manifest.name, manifest, created_at: now, updated_at: now };
+    return {
+      id: input.name,
+      tenant_id: input.tenant_id,
+      name: manifest.name,
+      manifest,
+      created_at: now,
+      updated_at: now,
+    };
   }
 }

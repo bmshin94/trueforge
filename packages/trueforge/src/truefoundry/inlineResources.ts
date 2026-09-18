@@ -19,24 +19,32 @@ export type InlineMcpServers = Readonly<Record<string, McpServerManifest>>;
 export type InlineSkills = Readonly<Record<string, SkillManifest>>;
 
 export function parseInlineMcpServers(raw: string): InlineMcpServers {
-  return parseByName(raw, X_TFG_MCP, (name, definition) => {
-    const parsed = McpServerManifestSchema.safeParse({ ...definition, type: 'remote', name });
-    if (!parsed.success) {
-      return { ok: false, reason: 'is not a valid MCP server definition' };
-    }
-    if (parsed.data.auth?.type === 'dcr') {
-      return { ok: false, reason: 'cannot use dcr auth — it needs a registered client and a stored token' };
-    }
-    return { ok: true, manifest: parsed.data };
+  return parseByName({
+    raw,
+    header: X_TFG_MCP,
+    parseEntry: (name, definition) => {
+      const parsed = McpServerManifestSchema.safeParse({ ...definition, type: 'remote', name });
+      if (!parsed.success) {
+        return { ok: false, reason: 'is not a valid MCP server definition' };
+      }
+      if (parsed.data.auth?.type === 'dcr') {
+        return { ok: false, reason: 'cannot use dcr auth — it needs a registered client and a stored token' };
+      }
+      return { ok: true, manifest: parsed.data };
+    },
   });
 }
 
 export function parseInlineSkills(raw: string): InlineSkills {
-  return parseByName(raw, X_TFG_SKILLS, (name, definition) => {
-    const parsed = SkillManifestSchema.safeParse({ ...definition, type: 'git', name });
-    return parsed.success
-      ? { ok: true, manifest: parsed.data }
-      : { ok: false, reason: 'is not a valid skill definition' };
+  return parseByName({
+    raw,
+    header: X_TFG_SKILLS,
+    parseEntry: (name, definition) => {
+      const parsed = SkillManifestSchema.safeParse({ ...definition, type: 'git', name });
+      return parsed.success
+        ? { ok: true, manifest: parsed.data }
+        : { ok: false, reason: 'is not a valid skill definition' };
+    },
   });
 }
 
@@ -46,11 +54,12 @@ type EntryResult<TManifest> = { ok: true; manifest: TManifest } | { ok: false; r
  * Rejects a malformed value rather than dropping it. Falling back to the tenant registry, where
  * these resources do not exist, would surface as a confusing "not configured" much later on.
  */
-function parseByName<TManifest>(
-  raw: string,
-  header: string,
-  parseEntry: (name: string, definition: object) => EntryResult<TManifest>,
-): Readonly<Record<string, TManifest>> {
+function parseByName<TManifest>(input: {
+  raw: string;
+  header: string;
+  parseEntry: (name: string, definition: object) => EntryResult<TManifest>;
+}): Readonly<Record<string, TManifest>> {
+  const { raw, header, parseEntry } = input;
   let decoded: unknown;
   try {
     decoded = JSON.parse(raw);
@@ -61,7 +70,10 @@ function parseByName<TManifest>(
     throw new HTTPException(400, { message: `${header} must map each name to a definition` });
   }
 
+  // `{}` inherits Object.prototype, so `map['constructor']` is Object (not undefined).
+  // NameSchema allows `constructor`, so strip the prototype (avoids Object.create(null)'s `any`).
   const manifests: Record<string, TManifest> = {};
+  Object.setPrototypeOf(manifests, null);
   for (const [name, definition] of Object.entries(decoded)) {
     if (!isPlainObject(definition)) {
       throw new HTTPException(400, { message: `${header} entry "${name}" must be an object` });
