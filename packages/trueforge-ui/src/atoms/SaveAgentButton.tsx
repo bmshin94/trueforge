@@ -17,25 +17,13 @@ import type { AgentSpec } from '../server/types.js';
 import { useSlot } from '../theme/SlotsProvider.js';
 import { getErrorMessage } from '../utils/getErrorMessage.js';
 import { useOptionalAgentConfigInstructions } from './draft/AgentConfigInstructionsContext.js';
+import { cloneAgentSpec } from './lib/cloneAgentSpec.js';
 import { Button } from './primitives/Button.js';
 import { SideDrawer } from './primitives/SideDrawer.js';
 
 const NO_CREATE_AGENT_PERMISSION_MESSAGE = 'No permission to create agents';
 
 type SaveIntent = 'create' | 'update';
-
-function cloneAgentSpec(spec: AgentSpec): AgentSpec {
-  return {
-    ...spec,
-    model: {
-      ...spec.model,
-      params: spec.model.params ? { ...spec.model.params } : undefined,
-    },
-    mcpServers: spec.mcpServers?.map((item: object) => ({ ...item })),
-    skills: spec.skills?.map((item: object) => ({ ...item })),
-    config: spec.config ? { ...spec.config } : undefined,
-  };
-}
 
 export type SaveAgentButtonProps = {
   disabled?: boolean;

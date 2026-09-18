@@ -11,6 +11,7 @@ import type { AgentSpec } from '../server/types.js';
 import { useSlot } from '../theme/SlotsProvider.js';
 import { getErrorMessage } from '../utils/getErrorMessage.js';
 import { auiButtonClass } from './lib/buttonClasses.js';
+import { cloneAgentSpec } from './lib/cloneAgentSpec.js';
 import { Button } from './primitives/Button.js';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './primitives/Dialog.js';
 import { DropdownMenu, DropdownMenuItem, DropdownMenuSeparator } from './primitives/DropdownMenu.js';
@@ -19,19 +20,6 @@ import { SideDrawer } from './primitives/SideDrawer.js';
 /** Immutable clone name for a library agent (`{name}-clone`). */
 export function cloneAgentName(agentName: string): string {
   return `${agentName}-clone`;
-}
-
-function cloneAgentSpec(spec: AgentSpec): AgentSpec {
-  return {
-    ...spec,
-    model: {
-      ...spec.model,
-      params: spec.model.params ? { ...spec.model.params } : undefined,
-    },
-    mcpServers: spec.mcpServers?.map((item: object) => ({ ...item })),
-    skills: spec.skills?.map((item: object) => ({ ...item })),
-    config: spec.config ? { ...spec.config } : undefined,
-  };
 }
 
 export type AgentOverflowMenuProps = {
