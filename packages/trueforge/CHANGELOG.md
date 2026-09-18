@@ -1,5 +1,13 @@
 # @truefoundry/trueforge
 
+## 0.2.0-rc.15
+
+### Patch Changes
+
+- fad55d8: Persist turn ownership as `active_executor_id` on the turn row, mint plain ULID turn ids, and peer cancel via the DB owner instead of embedding the executor in the turn id.
+- Updated dependencies [fad55d8]
+  - @truefoundry/trueforge-core@0.2.0-rc.7
+
 ## 0.2.0-rc.14
 
 ### Patch Changes

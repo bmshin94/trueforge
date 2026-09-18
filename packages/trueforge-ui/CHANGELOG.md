@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0-rc.12
+
+### Patch Changes
+
+- a273ed8: Preload Monaco when the UI shell mounts so tool request/response editors open faster.
+
 ## 0.3.0-rc.11
 
 ### Patch Changes
